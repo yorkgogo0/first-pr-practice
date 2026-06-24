@@ -20,6 +20,10 @@ test('isPalindrome returns false for a non-palindrome', () => {
   assert.strictEqual(isPalindrome('hello'), false);
 });
 
+test('isPalindrome returns true for an empty string', () => {
+  assert.strictEqual(isPalindrome(''), true);
+});
+
 test('reverseWords reverses word order', () => {
   assert.strictEqual(reverseWords('hello world'), 'world hello');
 });
