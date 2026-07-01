@@ -1,0 +1,37 @@
+name: Build gs2-parser Windows
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-gs2parser.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout gs2-parser
+        uses: actions/checkout@v4
+        with:
+          repository: xtjoeytx/gs2-parser
+          ref: main
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Configure CMake
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Upload gs2test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: gs2test-windows
+          path: build/bin/gs2test.exe
+          retention-days: 30
