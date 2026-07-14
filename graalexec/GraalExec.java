@@ -17,11 +17,13 @@ public class GraalExec {
 
     // ── Native bridge ────────────────────────────────────────────────────────────
     static boolean sNativeLoaded = false;
+    static String  sNativeError  = null;
     static {
         try {
             System.loadLibrary("graalexec");
             sNativeLoaded = true;
         } catch (UnsatisfiedLinkError e) {
+            sNativeError = e.getMessage();
             android.util.Log.e("GraalExec", "native lib failed: " + e.getMessage());
         }
     }
@@ -240,7 +242,7 @@ public class GraalExec {
             }
         });
 
-        log("Executor ready.");
+        log(sNativeLoaded ? "Executor ready." : "Native load FAILED: " + sNativeError);
     }
 
     // ── Execute GS2 source ────────────────────────────────────────────────────────

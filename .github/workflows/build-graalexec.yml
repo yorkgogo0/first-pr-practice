@@ -35,6 +35,7 @@ jobs:
             -shared -fPIC -O2 -std=c++17 \
             --sysroot="$SYSROOT" \
             -Wl,--hash-style=gnu \
+            -nostdlib++ \
             -o libgraalexec.so \
             graalexec/graalexec.cpp \
             -llog -landroid
