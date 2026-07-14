@@ -30,6 +30,7 @@ public class GraalExec {
     public static native boolean  nativeIsReady();
     public static native byte[]   nativeCompile(String source);
     public static native String   nativeInject(byte[] bytecode, int len);
+    public static native String   nativeDiag();
 
     // ── Built-in snippets ─────────────────────────────────────────────────────────
     private static final String SNIP_GUNMOD =
@@ -420,6 +421,24 @@ public class GraalExec {
             public void onClick(View v) { if (sOutput != null) sOutput.setText(""); }
         });
         btnRow.addView(clearBtn, new LinearLayout.LayoutParams(dp(ctx,70), -2));
+
+        // Diag button: read-only struct walk, no engine function calls, safe to press any time
+        Button diagBtn = new Button(ctx);
+        diagBtn.setText("Diag");
+        diagBtn.setTextColor(Color.WHITE);
+        diagBtn.setBackground(roundRect(Color.parseColor("#8e44ad"), dp(ctx,4)));
+        diagBtn.setAllCaps(false);
+        LinearLayout.LayoutParams diagLp = new LinearLayout.LayoutParams(dp(ctx,70), -2);
+        diagLp.setMargins(dp(ctx,6), 0, 0, 0);
+        diagBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                new Thread(new Runnable() { public void run() {
+                    String r = sNativeLoaded ? nativeDiag() : "native not loaded";
+                    log("[DIAG] " + r);
+                }}).start();
+            }
+        });
+        btnRow.addView(diagBtn, diagLp);
         panel.addView(btnRow, new LinearLayout.LayoutParams(-1, -2));
 
         // Output log

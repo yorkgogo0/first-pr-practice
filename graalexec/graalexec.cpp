@@ -121,47 +121,79 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
+// ── nativeDiag: safe read-only probe — no function calls into the engine ──────────
+// Reads the script list from the structure ohko described (ctx+0xB30→manager→list)
+// and returns count + first few object pointers. Zero risk of crash.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
+    if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
+
+    void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
+    if (!globalCtx) return env->NewStringUTF("ERR: ctx=null (not in world)");
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "ctx=%p", globalCtx);
+
+    // Navigate to script manager (ctx + 0xB30)
+    void* scriptMgr = *(void**)((uint8_t*)globalCtx + 0xB30);
+    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " mgr=%p", scriptMgr);
+    if (!scriptMgr) return env->NewStringUTF(buf);
+
+    // List struct at manager + 0x38
+    void* listStruct = *(void**)((uint8_t*)scriptMgr + 0x38);
+    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " lst=%p", listStruct);
+    if (!listStruct) return env->NewStringUTF(buf);
+
+    // Count at +12, array ptr at +16
+    int32_t count = *(int32_t*)((uint8_t*)listStruct + 12);
+    void** arr2  = *(void***)((uint8_t*)listStruct + 16);
+    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " cnt=%d arr=%p", count, arr2);
+    if (count <= 0 || !arr2) return env->NewStringUTF(buf);
+
+    // Print first 3 object pointers
+    int show = (count < 3) ? count : 3;
+    for (int i = 0; i < show; i++) {
+        void* obj = arr2[i];
+        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " [%d]=%p", i, obj);
+    }
+    return env->NewStringUTF(buf);
+}
+
 // ── nativeInject ─────────────────────────────────────────────────────────────────
-// Pipeline (ohko-verified):
-//   1. Read global ctx from qword_920630
-//   2. sub_6614E4(ctx, "ZEXEC") → script object (created in engine's registry)
-//   3. sub_84FFC0(scriptObj, bytecode) → parse bytecode, populate function table
-//   4. Read function table from scriptObj+80
-//   5. findInTable(table, hash("onCreated"), "onCreated") → event block
-//   6. execEvent(eventBlock, 0) → run onCreated immediately
+// Phase A (safe probe): just call sub_6614E4, log the returned pointer, return.
+// Phase B (bind): if Phase A doesn't crash, uncomment bindBytecode call below.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeInject(JNIEnv* env, jclass, jbyteArray arr, jint len) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
 
-    // Step 1: Deref global context pointer
     void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
-    if (!globalCtx) return env->NewStringUTF("ERR: game context null — not in world yet");
-    LOGI("ctx=%p", globalCtx);
+    if (!globalCtx) return env->NewStringUTF("ERR: ctx=null (not in world)");
 
-    // Step 2: Copy bytecode to a persistent native heap buffer
+    // Copy bytecode now so we have it ready
     jbyte* raw = env->GetByteArrayElements(arr, nullptr);
     if (!raw) return env->NewStringUTF("ERR: null bytecode");
     uint8_t* bytecodeBuf = (uint8_t*)malloc((size_t)len);
     memcpy(bytecodeBuf, raw, (size_t)len);
     env->ReleaseByteArrayElements(arr, raw, JNI_ABORT);
 
-    // Step 3: Find-or-create the script object in the engine's script registry
+    // Phase A: call sub_6614E4(ctx, name) to find/create the script object.
+    // If THIS causes the crash, we know sub_6614E4 is wrong and we need a different offset.
     auto findOrCreate = (findOrCreate_t)(g_base + OFF_FIND_OR_CREATE);
     void* nameStr = make_graal_string_s("ZEXEC");
     void* scriptObj = findOrCreate(globalCtx, nameStr);
     if (!scriptObj) {
         free(bytecodeBuf);
-        return env->NewStringUTF("ERR: sub_6614E4 returned null");
+        char r[64]; snprintf(r, sizeof(r), "ERR: findOrCreate=null ctx=%p", globalCtx);
+        return env->NewStringUTF(r);
     }
-    LOGI("scriptObj=%p", scriptObj);
+    LOGI("scriptObj=%p len=%d", scriptObj, len);
 
-    // Step 4: Bind the compiled bytecode — this parses segments and builds function table
+    // Phase B: bind bytecode. Comment this out if Phase A alone crashes.
     auto bindBytecode = (bindBytecode_t)(g_base + OFF_BIND_BYTECODE);
     bindBytecode(scriptObj, bytecodeBuf);
-    LOGI("Bytecode bound (%d bytes)", len);
+    LOGI("Bytecode bound");
 
-    // Engine automatically fires onCreated on the next tick when a new script object
-    // enters the registry. No need to call it manually — and sub_5C2608 (findInTable)
-    // starts with BLR X8 which is unsafe to call without the engine's internal X8 setup.
-    return env->NewStringUTF("OK: injected — onCreated fires on next engine tick");
+    char result[128];
+    snprintf(result, sizeof(result), "OK: obj=%p bc=%d bytes", scriptObj, len);
+    return env->NewStringUTF(result);
 }
