@@ -1,7 +1,14 @@
 /**
  * libgraalexec.so — GraalOnline Era GS2 executor native bridge
- * Offsets RE'd from libqplayandroid.so (ARM64, this APK version).
- * Loaded by com.graal.exec.GraalExec via System.loadLibrary("graalexec").
+ *
+ * Injection pipeline verified from ohko's reverse engineering post:
+ *   sub_6614E4(ctx, name)          → find-or-create script object
+ *   sub_84FFC0(scriptObj, bytecode) → bind compiled bytecode to object
+ *   sub_5C2608(tableRoot, hash, nm) → look up event block in function table
+ *   sub_84C254(eventBlock, 0)       → execute the event
+ *
+ * Global context: *(void**)(base + 0x920630)   [qword_920630]
+ * Function table in script object: offset +80
  */
 #include <jni.h>
 #include <android/log.h>
@@ -16,37 +23,20 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-// ── Function pointer types (signatures from Frida NativeFunction analysis) ──────
-typedef void  (*masterLoader_t)          (void*, void*);
-typedef void  (*initDescriptor_t)        (void*);
-typedef void* (*registerInSystem_t)      (void*);
-typedef void  (*addToUpdateQueue_t)      (void*);
-typedef void  (*attachToManager_t)       (void*, void*);
-typedef void  (*registerScriptInSystem_t)(void*, void*, void*);
-typedef void* (*findFunc_t)              (void*, void*);
+// ── Verified offsets from ohko's RE of libqplayandroid.so ───────────────────────
+#define OFF_GLOBAL_CTX_PTR    0x920630  // qword_920630: pointer to game context struct
+#define OFF_FIND_OR_CREATE    0x6614E4  // sub_6614E4(ctx, nameStr) → script object (creates if missing)
+#define OFF_BIND_BYTECODE     0x84FFC0  // sub_84FFC0(scriptObj, bytecode): parse bytecode into script
+#define OFF_FIND_IN_TABLE     0x5C2608  // findInTable(tableRoot, hash, nameStr) → event block
+#define OFF_EXEC_EVENT        0x84C254  // execEvent(eventBlock, 0): run the event now
+#define SCRIPT_FUNC_TABLE_OFF 80        // offset of function table ptr within script object
 
-// ── Globals ──────────────────────────────────────────────────────────────────────
+typedef void* (*findOrCreate_t)(void* ctx, void* nameStr);
+typedef void  (*bindBytecode_t)(void* scriptObj, void* bytecode);
+typedef void* (*findInTable_t) (void* tableRoot, uint32_t hash, void* nameStr);
+typedef void* (*execEvent_t)   (void* eventBlock, void* unused);
+
 static uintptr_t g_base = 0;
-
-static masterLoader_t           g_masterLoader           = nullptr;
-static initDescriptor_t         g_initDescriptor         = nullptr;
-static registerInSystem_t       g_registerInSystem       = nullptr;
-static addToUpdateQueue_t       g_addToUpdateQueue       = nullptr;
-static attachToManager_t        g_attachToManager        = nullptr;
-static registerScriptInSystem_t g_registerScriptInSystem = nullptr;
-static findFunc_t               g_findFunc               = nullptr;
-
-// Offsets from libqplayandroid.so base (verified via Frida RE)
-#define OFF_MASTER_LOADER             0x869794
-#define OFF_INIT_DESCRIPTOR           0x866200
-#define OFF_REGISTER_IN_SYSTEM        0x8212B0
-#define OFF_ADD_TO_UPDATE_QUEUE       0x86A884
-#define OFF_ATTACH_TO_MANAGER         0x8715C0
-#define OFF_REGISTER_SCRIPT_IN_SYSTEM 0x680858
-#define OFF_FIND_FUNC                 0x67A35C
-#define OFF_VTABLE_EVENTS             0x8A2940
-#define OFF_GLOBAL_CTX                0x939BD0
-#define OFF_QWORD_93BEF0              0x93BEF0
 
 // ── Library base finder ──────────────────────────────────────────────────────────
 static int find_lib_cb(struct dl_phdr_info* info, size_t, void* data) {
@@ -62,48 +52,53 @@ static int find_lib_cb(struct dl_phdr_info* info, size_t, void* data) {
 static bool init_engine() {
     if (g_base) return true;
     dl_iterate_phdr(find_lib_cb, &g_base);
-    if (!g_base) { LOGE("libqplayandroid.so not loaded yet"); return false; }
+    if (!g_base) { LOGE("libqplayandroid.so not mapped yet"); return false; }
     LOGI("libqplayandroid base=0x%lx", (unsigned long)g_base);
-
-    g_masterLoader           = (masterLoader_t)          (g_base + OFF_MASTER_LOADER);
-    g_initDescriptor         = (initDescriptor_t)        (g_base + OFF_INIT_DESCRIPTOR);
-    g_registerInSystem       = (registerInSystem_t)      (g_base + OFF_REGISTER_IN_SYSTEM);
-    g_addToUpdateQueue       = (addToUpdateQueue_t)      (g_base + OFF_ADD_TO_UPDATE_QUEUE);
-    g_attachToManager        = (attachToManager_t)       (g_base + OFF_ATTACH_TO_MANAGER);
-    g_registerScriptInSystem = (registerScriptInSystem_t)(g_base + OFF_REGISTER_SCRIPT_IN_SYSTEM);
-    g_findFunc               = (findFunc_t)              (g_base + OFF_FIND_FUNC);
-    LOGI("All GS2 engine functions mapped");
     return true;
 }
 
-// ── Graal string helpers (matches overlay.js createGraalString) ──────────────────
+// ── GraalString helpers ─────────────────────────────────────────────────────────
+// Format confirmed by ohko: buf = [int32 len][int32 refcount=1][UTF8 chars]
+// Returned as pBuf → &buf (pointer-to-pointer, matches engine's internal layout)
 static void* make_graal_string(const char* str, size_t len) {
-    uint8_t* buf = (uint8_t*)calloc(len + 9, 1);
-    *(int32_t*)buf        = (int32_t)len;
-    *(int32_t*)(buf + 4)  = 1;
+    uint8_t* buf = (uint8_t*)malloc(len + 9);
+    memset(buf, 0, len + 9);
+    *(int32_t*)buf       = (int32_t)len;
+    *(int32_t*)(buf + 4) = 1;
     memcpy(buf + 8, str, len);
     void** pBuf = (void**)malloc(sizeof(void*));
     *pBuf = buf;
-    return pBuf;
+    return (void*)pBuf;
 }
-
 static void* make_graal_string_s(const char* str) {
     return make_graal_string(str, strlen(str));
 }
 
+// ── GraalHash ──────────────────────────────────────────────────────────────────
+// From ohko's getGraalHash JS: h=5381, h=((h*17)^char)>>>0, uppercase folded to lower
+static uint32_t graal_hash(const char* name) {
+    uint32_t h = 5381;
+    for (const char* p = name; *p; p++) {
+        uint32_t c = (uint32_t)(unsigned char)*p;
+        if (c >= 0x41 && c <= 0x5A) c += 0x20; // fold to lowercase
+        h = ((h * 17) ^ c);
+    }
+    return h;
+}
+
 // ── JNI_OnLoad ──────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
-    init_engine();   // best-effort at load time; engine may not be loaded yet
+    init_engine();
     return JNI_VERSION_1_6;
 }
 
-// ── nativeIsReady: returns true once libqplayandroid.so is mapped ────────────────
+// ── nativeIsReady ────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_graal_exec_GraalExec_nativeIsReady(JNIEnv*, jclass) {
     return init_engine() ? JNI_TRUE : JNI_FALSE;
 }
 
-// ── nativeCompile: compile GS2 source → bytecode using gs2-parser ───────────────
+// ── nativeCompile ────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     const char* src = env->GetStringUTFChars(jsrc, nullptr);
@@ -112,7 +107,6 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     env->ReleaseStringUTFChars(jsrc, src);
 
     auto result = GS2Context::Compile(script, "level", "ZEXEC", false);
-
     if (!result.success || result.bytecode.length() == 0) {
         for (const auto& err : result.errors)
             LOGE("GS2 compile: %s", err.msg().c_str());
@@ -127,104 +121,65 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeInject: takes compiled GS2 bytecode (byte[]) and injects it ──────────
+// ── nativeInject ─────────────────────────────────────────────────────────────────
+// Pipeline (ohko-verified):
+//   1. Read global ctx from qword_920630
+//   2. sub_6614E4(ctx, "ZEXEC") → script object (created in engine's registry)
+//   3. sub_84FFC0(scriptObj, bytecode) → parse bytecode, populate function table
+//   4. Read function table from scriptObj+80
+//   5. findInTable(table, hash("onCreated"), "onCreated") → event block
+//   6. execEvent(eventBlock, 0) → run onCreated immediately
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeInject(JNIEnv* env, jclass, jbyteArray arr, jint len) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
 
-    // Payload: int32 length, int32 999, then bytecode (matches overlay.js)
+    // Step 1: Deref global context pointer
+    void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
+    if (!globalCtx) return env->NewStringUTF("ERR: game context null — not in world yet");
+    LOGI("ctx=%p", globalCtx);
+
+    // Step 2: Copy bytecode to a persistent native heap buffer
     jbyte* raw = env->GetByteArrayElements(arr, nullptr);
     if (!raw) return env->NewStringUTF("ERR: null bytecode");
-
-    uint8_t* payload = (uint8_t*)calloc(len + 8, 1);
-    *(int32_t*)payload       = len;
-    *(int32_t*)(payload + 4) = 999;
-    memcpy(payload + 8, (uint8_t*)raw, (size_t)len);
+    uint8_t* bytecodeBuf = (uint8_t*)malloc((size_t)len);
+    memcpy(bytecodeBuf, raw, (size_t)len);
     env->ReleaseByteArrayElements(arr, raw, JNI_ABORT);
 
-    // Read global context pointers
-    void*  globalCtx  = *(void**)(g_base + OFF_GLOBAL_CTX);
-    void*  scriptSys  = *(void**)(g_base + OFF_QWORD_93BEF0);
-    if (!globalCtx || !scriptSys) {
-        free(payload);
-        return env->NewStringUTF("ERR: game not in world yet");
+    // Step 3: Find-or-create the script object in the engine's script registry
+    auto findOrCreate = (findOrCreate_t)(g_base + OFF_FIND_OR_CREATE);
+    void* nameStr = make_graal_string_s("ZEXEC");
+    void* scriptObj = findOrCreate(globalCtx, nameStr);
+    if (!scriptObj) {
+        free(bytecodeBuf);
+        return env->NewStringUTF("ERR: sub_6614E4 returned null");
     }
+    LOGI("scriptObj=%p", scriptObj);
 
-    // Generate unique name "Mod_XXXXXX"
-    static int s_seq = 100000;
-    char nameBuf[32];
-    snprintf(nameBuf, sizeof(nameBuf), "Mod_%d", s_seq++);
-    void* namePtr  = make_graal_string_s(nameBuf);
-    void* dummyPtr = calloc(sizeof(void*), 1);
+    // Step 4: Bind the compiled bytecode — this parses segments and builds function table
+    auto bindBytecode = (bindBytecode_t)(g_base + OFF_BIND_BYTECODE);
+    bindBytecode(scriptObj, bytecodeBuf);
+    LOGI("Bytecode bound (%d bytes)", len);
 
-    // Register script slot
-    g_registerScriptInSystem(scriptSys, namePtr, dummyPtr);
-
-    // Find the weapon/script object
-    void* weaponObj = g_findFunc(scriptSys, namePtr);
-    if (!weaponObj) {
-        free(payload); return env->NewStringUTF("ERR: registerScript returned null");
+    // Step 5: Find the function table inside the script object
+    void* tableRoot = *(void**)((uint8_t*)scriptObj + SCRIPT_FUNC_TABLE_OFF);
+    if (!tableRoot) {
+        // Table not ready yet — engine may fire onCreated via its own event loop
+        return env->NewStringUTF("OK: bound (func table not populated yet)");
     }
-    *((uint8_t*)weaponObj + 22) = 6;   // set type flag
+    LOGI("tableRoot=%p", tableRoot);
 
-    // Build event descriptor (256 bytes — code writes up to offset 233)
-    void* vtableEvents = (void*)(g_base + OFF_VTABLE_EVENTS);
-    uint8_t* desc = (uint8_t*)calloc(256, 1);
-    void* v19 = calloc(24, 1);
-    void* v20 = calloc(24, 1);
-    *(void**)v19 = vtableEvents;
-    *(void**)v20 = vtableEvents;
+    // Step 6: Look up and execute onCreated
+    auto findInTable = (findInTable_t)(g_base + OFF_FIND_IN_TABLE);
+    auto execEvent   = (execEvent_t)  (g_base + OFF_EXEC_EVENT);
 
-    *(void**)(desc +  0) = weaponObj;
-    *(void**)(desc + 64) = v19;
-    *(void**)(desc + 40) = v20;
-    desc[88]  = 1;
-    *(int32_t*)(desc + 92) = 10000;
-    desc[104] = 0;
-
-    g_initDescriptor(desc);
-    g_registerInSystem(weaponObj);
-    *(void**)((uint8_t*)weaponObj + 80) = desc;
-
-    // Attach payload and call masterLoader
-    void** pPayload = (void**)malloc(sizeof(void*));
-    *pPayload = payload;
-    g_masterLoader(desc, pPayload);
-
-    // Clear skip flags in the loaded list
-    void* listPtr = *(void**)((uint8_t*)desc + 64);
-    if (listPtr) {
-        int count = *(int32_t*)((uint8_t*)listPtr + 12);
-        if (count > 20) count = 20;
-        for (int i = 0; i < count; i++) {
-            void* item = *(void**)((uint8_t*)listPtr + 16 + i * 8);
-            if (item) *((uint8_t*)item + 49) = 0;
-        }
+    uint32_t hash = graal_hash("onCreated");
+    void* evtName = make_graal_string_s("onCreated");
+    void* eventBlock = findInTable(tableRoot, hash, evtName);
+    if (!eventBlock) {
+        return env->NewStringUTF("OK: bound (onCreated not in table — may fire via engine)");
     }
+    LOGI("onCreated block=%p, executing", eventBlock);
+    execEvent(eventBlock, nullptr);
 
-    // Call vtable[144] on weaponObj
-    void** vtable = *(void***)weaponObj;
-    if (vtable) {
-        typedef void (*vfn_t)(void*, void*);
-        vfn_t fn144 = (vfn_t)vtable[18];   // vtable[144] = offset 18 (144/8=18)
-        fn144(weaponObj, nullptr);
-    }
-
-    // Finalize descriptor timing from global context
-    double gameTime = *(double*)((uint8_t*)globalCtx + 184);
-    desc[20]  = 0; desc[73]  = 1; desc[104] = 1; desc[232] = 1; desc[233] = 1;
-    *(double*)(desc + 16) = 1.0;
-    *(double*)(desc + 24) = gameTime + 0.5;
-    desc[32]  = 0; desc[72]  = 0; desc[88]  = 1;
-    *(int32_t*)(desc + 92) = 10000;
-
-    g_addToUpdateQueue(weaponObj);
-    g_attachToManager(globalCtx, weaponObj);
-
-    LOGI("Injected %s (%d bytes)", nameBuf, len);
-    // Note: desc/payload/weaponObj not freed — GS2 engine holds references
-
-    char result[64];
-    snprintf(result, sizeof(result), "OK: injected %s", nameBuf);
-    return env->NewStringUTF(result);
+    return env->NewStringUTF("OK: injected + onCreated executed");
 }
