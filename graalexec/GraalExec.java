@@ -314,9 +314,12 @@ public class GraalExec {
     private static int gTi;
 
     public static byte[] compileGS2(String src) {
-        // Strip comments
+        // Strip CLIENTSIDE directive and comments (matching overlay.js exactly)
+        src = src.replaceAll("//#?CLIENTSIDE\\s*", "");
         src = src.replaceAll("//[^\n]*", "").replaceAll("/\\*[\\s\\S]*?\\*/", "").trim();
-        if (!src.matches("(?s).*^\\s*function\\s+.*")) {
+        // Strip 'public' keyword before function
+        src = src.replaceAll("(?m)^\\s*public\\s+(function)", "$1");
+        if (!src.matches("(?s).*\\bfunction\\s+.*")) {
             src = "function onCreated() {\n" + src + "\n}";
         }
 
@@ -343,7 +346,7 @@ public class GraalExec {
             fnSeg.add(0);
         }
         if (!fnSeg.isEmpty()) {
-            i32be(out, 1); i32be(out, fnSeg.size()); out.addAll(fnSeg);
+            i32be(out, 2); i32be(out, fnSeg.size()); out.addAll(fnSeg); // type 2, not 1 (matches overlay.js)
         }
 
         // Segment 3: string table
