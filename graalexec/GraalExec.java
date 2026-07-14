@@ -16,7 +16,15 @@ import java.util.List;
 public class GraalExec {
 
     // ── Native bridge ────────────────────────────────────────────────────────────
-    static { System.loadLibrary("graalexec"); }
+    static boolean sNativeLoaded = false;
+    static {
+        try {
+            System.loadLibrary("graalexec");
+            sNativeLoaded = true;
+        } catch (UnsatisfiedLinkError e) {
+            android.util.Log.e("GraalExec", "native lib failed: " + e.getMessage());
+        }
+    }
     public static native boolean nativeIsReady();
     public static native String  nativeInject(byte[] bytecode, int len);
 
@@ -239,6 +247,7 @@ public class GraalExec {
     public static void executeGS2(final String source) {
         new Thread(new Runnable() { public void run() {
             try {
+                if (!sNativeLoaded) { log("Native lib not loaded — injection unavailable."); return; }
                 log("Compiling...");
                 byte[] bytecode = compileGS2(source);
                 if (bytecode == null || bytecode.length == 0) { log("Compile error."); return; }
