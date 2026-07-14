@@ -121,9 +121,9 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag: safe read-only probe — no function calls into the engine ──────────
-// Reads the script list from the structure ohko described (ctx+0xB30→manager→list)
-// and returns count + first few object pointers. Zero risk of crash.
+// ── nativeDiag: scan ctx struct for non-null pointers to find script manager offset ──
+// ctx+0xB30 returned null so we scan 0x800..0xD00 for candidates.
+// Safe: read-only, no engine calls.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
@@ -131,32 +131,31 @@ Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
     if (!globalCtx) return env->NewStringUTF("ERR: ctx=null (not in world)");
 
-    char buf[512];
-    snprintf(buf, sizeof(buf), "ctx=%p", globalCtx);
+    // Scan ctx+0x800 .. ctx+0xD00 for non-null pointer-sized slots.
+    // Log up to 16 hits as "off:val" pairs. Each hit is a candidate for the script manager.
+    std::string out;
+    out.reserve(512);
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "ctx=%p\n", globalCtx);
+    out += tmp;
 
-    // Navigate to script manager (ctx + 0xB30)
-    void* scriptMgr = *(void**)((uint8_t*)globalCtx + 0xB30);
-    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " mgr=%p", scriptMgr);
-    if (!scriptMgr) return env->NewStringUTF(buf);
-
-    // List struct at manager + 0x38
-    void* listStruct = *(void**)((uint8_t*)scriptMgr + 0x38);
-    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " lst=%p", listStruct);
-    if (!listStruct) return env->NewStringUTF(buf);
-
-    // Count at +12, array ptr at +16
-    int32_t count = *(int32_t*)((uint8_t*)listStruct + 12);
-    void** arr2  = *(void***)((uint8_t*)listStruct + 16);
-    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " cnt=%d arr=%p", count, arr2);
-    if (count <= 0 || !arr2) return env->NewStringUTF(buf);
-
-    // Print first 3 object pointers
-    int show = (count < 3) ? count : 3;
-    for (int i = 0; i < show; i++) {
-        void* obj = arr2[i];
-        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " [%d]=%p", i, obj);
+    int hits = 0;
+    for (uint32_t off = 0x800; off < 0xD00 && hits < 16; off += 8) {
+        void* val = *(void**)((uint8_t*)globalCtx + off);
+        if (val) {
+            snprintf(tmp, sizeof(tmp), "+%X:%p\n", off, val);
+            out += tmp;
+            hits++;
+        }
     }
-    return env->NewStringUTF(buf);
+    if (hits == 0) out += "no non-null ptrs in 0x800..0xD00\n";
+
+    // Also show the known offset result for reference
+    void* atB30 = *(void**)((uint8_t*)globalCtx + 0xB30);
+    snprintf(tmp, sizeof(tmp), "B30=%p", atB30);
+    out += tmp;
+
+    return env->NewStringUTF(out.c_str());
 }
 
 // ── nativeInject ─────────────────────────────────────────────────────────────────
