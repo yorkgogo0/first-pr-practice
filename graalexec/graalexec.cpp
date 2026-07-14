@@ -167,9 +167,9 @@ Java_com_graal_exec_GraalExec_nativeInject(JNIEnv* env, jclass, jbyteArray arr, 
     }
     *((uint8_t*)weaponObj + 22) = 6;   // set type flag
 
-    // Build event descriptor (136 bytes, two 24-byte vtable event structs)
+    // Build event descriptor (256 bytes — code writes up to offset 233)
     void* vtableEvents = (void*)(g_base + OFF_VTABLE_EVENTS);
-    uint8_t* desc = (uint8_t*)calloc(136, 1);
+    uint8_t* desc = (uint8_t*)calloc(256, 1);
     void* v19 = calloc(24, 1);
     void* v20 = calloc(24, 1);
     *(void**)v19 = vtableEvents;

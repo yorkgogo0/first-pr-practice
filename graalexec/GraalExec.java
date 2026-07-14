@@ -492,9 +492,13 @@ public class GraalExec {
             try {
                 if (!sNativeLoaded) { log("Native lib not loaded — injection unavailable."); return; }
 
-                // Ensure #CLIENTSIDE header is present
-                String src = source;
-                if (!src.startsWith("//#CLIENTSIDE") && !src.startsWith("#CLIENTSIDE")) {
+                String src = source.trim();
+
+                // Wrap bare code (no function declarations) in onCreated
+                if (!src.contains("function ")) {
+                    String bare = src.replace("//#CLIENTSIDE", "").replace("#CLIENTSIDE", "").trim();
+                    src = "//#CLIENTSIDE\nfunction onCreated() {\n" + bare + "\n}";
+                } else if (!src.startsWith("//#CLIENTSIDE") && !src.startsWith("#CLIENTSIDE")) {
                     src = "//#CLIENTSIDE\n" + src;
                 }
 
