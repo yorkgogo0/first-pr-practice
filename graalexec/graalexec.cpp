@@ -160,26 +160,8 @@ Java_com_graal_exec_GraalExec_nativeInject(JNIEnv* env, jclass, jbyteArray arr, 
     bindBytecode(scriptObj, bytecodeBuf);
     LOGI("Bytecode bound (%d bytes)", len);
 
-    // Step 5: Find the function table inside the script object
-    void* tableRoot = *(void**)((uint8_t*)scriptObj + SCRIPT_FUNC_TABLE_OFF);
-    if (!tableRoot) {
-        // Table not ready yet — engine may fire onCreated via its own event loop
-        return env->NewStringUTF("OK: bound (func table not populated yet)");
-    }
-    LOGI("tableRoot=%p", tableRoot);
-
-    // Step 6: Look up and execute onCreated
-    auto findInTable = (findInTable_t)(g_base + OFF_FIND_IN_TABLE);
-    auto execEvent   = (execEvent_t)  (g_base + OFF_EXEC_EVENT);
-
-    uint32_t hash = graal_hash("onCreated");
-    void* evtName = make_graal_string_s("onCreated");
-    void* eventBlock = findInTable(tableRoot, hash, evtName);
-    if (!eventBlock) {
-        return env->NewStringUTF("OK: bound (onCreated not in table — may fire via engine)");
-    }
-    LOGI("onCreated block=%p, executing", eventBlock);
-    execEvent(eventBlock, nullptr);
-
-    return env->NewStringUTF("OK: injected + onCreated executed");
+    // Engine automatically fires onCreated on the next tick when a new script object
+    // enters the registry. No need to call it manually — and sub_5C2608 (findInTable)
+    // starts with BLR X8 which is unsafe to call without the engine's internal X8 setup.
+    return env->NewStringUTF("OK: injected — onCreated fires on next engine tick");
 }
