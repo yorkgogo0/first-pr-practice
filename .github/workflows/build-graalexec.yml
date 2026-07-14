@@ -48,6 +48,7 @@ jobs:
             -DANDROID_PLATFORM=android-21 \
             -DANDROID_STL=c++_static \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DGS2PARSER_BUILD_GS2TEST=OFF
           cmake --build build --parallel
           cp build/libgraalexec.so .
