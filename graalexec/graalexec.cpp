@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string>
+#include "compiler/GS2Context.h"
 
 #define TAG "GraalExec"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -99,6 +101,30 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_graal_exec_GraalExec_nativeIsReady(JNIEnv*, jclass) {
     return init_engine() ? JNI_TRUE : JNI_FALSE;
+}
+
+// ── nativeCompile: compile GS2 source → bytecode using gs2-parser ───────────────
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
+    const char* src = env->GetStringUTFChars(jsrc, nullptr);
+    if (!src) return nullptr;
+    std::string script(src);
+    env->ReleaseStringUTFChars(jsrc, src);
+
+    auto result = GS2Context::Compile(script, "level", "ZEXEC", false);
+
+    if (!result.success || result.bytecode.length() == 0) {
+        for (const auto& err : result.errors)
+            LOGE("GS2 compile: %s", err.msg().c_str());
+        return nullptr;
+    }
+
+    LOGI("Compiled %zu bytes", result.bytecode.length());
+    jsize len = (jsize)result.bytecode.length();
+    jbyteArray arr = env->NewByteArray(len);
+    env->SetByteArrayRegion(arr, 0, len,
+        reinterpret_cast<const jbyte*>(result.bytecode.buffer()));
+    return arr;
 }
 
 // ── nativeInject: takes compiled GS2 bytecode (byte[]) and injects it ──────────

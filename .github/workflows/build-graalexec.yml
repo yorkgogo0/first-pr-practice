@@ -5,6 +5,7 @@ on:
     paths:
       - 'graalexec/graalexec.cpp'
       - 'graalexec/GraalExec.java'
+      - 'CMakeLists.txt'
       - '.github/workflows/build-graalexec.yml'
   workflow_dispatch:
 
@@ -14,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Install NDK ──────────────────────────────────────────────────────────
+      # ── Install Android NDK + build tools ────────────────────────────────────────
       - name: Install Android NDK
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
@@ -26,23 +27,34 @@ jobs:
           echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-34/android.jar" >> $GITHUB_ENV
           echo "D8=$ANDROID_HOME/build-tools/34.0.0/d8" >> $GITHUB_ENV
 
-      # ── Compile libgraalexec.so ───────────────────────────────────────────────
-      - name: Compile libgraalexec.so for ARM64
+      # ── Install bison + flex (required by gs2-parser's CMake build) ──────────────
+      - name: Install bison and flex
+        run: sudo apt-get install -y bison flex
+
+      # ── Checkout gs2-parser (no submodules — skip emsdk) ────────────────────────
+      - name: Checkout gs2-parser
+        uses: actions/checkout@v4
+        with:
+          repository: xtjoeytx/gs2-parser
+          path: gs2-parser
+          submodules: false
+
+      # ── Build libgraalexec.so via CMake (links gs2-parser statically) ────────────
+      - name: Build libgraalexec.so for ARM64
         run: |
-          CXX="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++"
-          SYSROOT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          $CXX \
-            -shared -fPIC -O2 -std=c++17 \
-            --sysroot="$SYSROOT" \
-            -Wl,--hash-style=gnu \
-            -nostdlib++ \
-            -o libgraalexec.so \
-            graalexec/graalexec.cpp \
-            -llog -landroid
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-21 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGS2PARSER_BUILD_GS2TEST=OFF
+          cmake --build build --parallel
+          cp build/libgraalexec.so .
           file libgraalexec.so
           ls -lh libgraalexec.so
 
-      # ── Compile GraalExec.java → DEX → smali ────────────────────────────────
+      # ── Compile GraalExec.java → DEX → smali ────────────────────────────────────
       - name: Compile GraalExec.java
         run: |
           mkdir -p build/classes
@@ -73,9 +85,8 @@ jobs:
           baksmali disassemble build/dex/classes.dex -o build/smali
           echo "=== Smali files ==="
           find build/smali -name "*.smali"
-          cat build/smali/com/graal/exec/GraalExec.smali || true
 
-      # ── Upload artifacts ──────────────────────────────────────────────────────
+      # ── Upload artifacts ──────────────────────────────────────────────────────────
       - name: Upload libgraalexec.so
         uses: actions/upload-artifact@v4
         with:

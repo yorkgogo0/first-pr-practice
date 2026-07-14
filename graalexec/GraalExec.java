@@ -27,8 +27,245 @@ public class GraalExec {
             android.util.Log.e("GraalExec", "native lib failed: " + e.getMessage());
         }
     }
-    public static native boolean nativeIsReady();
-    public static native String  nativeInject(byte[] bytecode, int len);
+    public static native boolean  nativeIsReady();
+    public static native byte[]   nativeCompile(String source);
+    public static native String   nativeInject(byte[] bytecode, int len);
+
+    // ── Built-in snippets ─────────────────────────────────────────────────────────
+    private static final String SNIP_GUNMOD =
+        "//#CLIENTSIDE\n" +
+        "function onCreated() {\n" +
+        "    (@ \"global\").infAmmoActive = false;\n" +
+        "    (@ \"global\").rapidFireActive = false;\n" +
+        "    (@ \"global\").noSpreadActive = false;\n" +
+        "    if ((@ \"global\").gunCache == nil) {\n" +
+        "        (@ \"global\").gunCache = {};\n" +
+        "    }\n" +
+        "    hookfunction(this, \"\", \"setClipStored\", \"onClipHook\");\n" +
+        "    showGui();\n" +
+        "    echo(\">>> Weapon System Hooked!\");\n" +
+        "}\n" +
+        "function showGui() {\n" +
+        "    if (findobject(\"WeaponWin\") != nil) findobject(\"WeaponWin\").destroy();\n" +
+        "    new GuiWindowCtrl(\"WeaponWin\") {\n" +
+        "        profile = GuiBlueWindowProfile;\n" +
+        "        title = \"Weapon Mod v2\";\n" +
+        "        x = 200; y = 200;\n" +
+        "        width = 180; height = 160;\n" +
+        "        new GuiButtonCtrl(\"BtnInfAmmo\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 30; width = 160; height = 30;\n" +
+        "            text = \"Inf Ammo: OFF\";\n" +
+        "        }\n" +
+        "        new GuiButtonCtrl(\"BtnRapid\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 70; width = 160; height = 30;\n" +
+        "            text = \"Rapid/NoFreeze: OFF\";\n" +
+        "        }\n" +
+        "        new GuiButtonCtrl(\"BtnNoSpread\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 110; width = 160; height = 30;\n" +
+        "            text = \"No Spread: OFF\";\n" +
+        "        }\n" +
+        "    }\n" +
+        "}\n" +
+        "function BtnInfAmmo.onAction() {\n" +
+        "    (@ \"global\").infAmmoActive = !(@ \"global\").infAmmoActive;\n" +
+        "    BtnInfAmmo.text = ((@ \"global\").infAmmoActive ? \"Inf Ammo: ON\" : \"Inf Ammo: OFF\");\n" +
+        "}\n" +
+        "function BtnRapid.onAction() {\n" +
+        "    (@ \"global\").rapidFireActive = !(@ \"global\").rapidFireActive;\n" +
+        "    BtnRapid.text = ((@ \"global\").rapidFireActive ? \"Rapid/NoFreeze: ON\" : \"Rapid/NoFreeze: OFF\");\n" +
+        "}\n" +
+        "function BtnNoSpread.onAction() {\n" +
+        "    (@ \"global\").noSpreadActive = !(@ \"global\").noSpreadActive;\n" +
+        "    BtnNoSpread.text = ((@ \"global\").noSpreadActive ? \"No Spread: ON\" : \"No Spread: OFF\");\n" +
+        "}\n" +
+        "public function onClipHook() {\n" +
+        "    temp.gunName = client.gun_weapon;\n" +
+        "    temp.cur = findobject(temp.gunName);\n" +
+        "    if (temp.cur == nil) return;\n" +
+        "    temp.orig = nil;\n" +
+        "    for (temp.item : (@ \"global\").gunCache) {\n" +
+        "        if (temp.item[0] == temp.gunName) {\n" +
+        "            temp.orig = temp.item;\n" +
+        "            break;\n" +
+        "        }\n" +
+        "    }\n" +
+        "    if (temp.orig == nil) {\n" +
+        "        temp.newData = {\n" +
+        "            temp.gunName,\n" +
+        "            temp.cur.gun_spread,\n" +
+        "            temp.cur.gun_repeatfire,\n" +
+        "            temp.cur.player_freezereload,\n" +
+        "            temp.cur.player_freezefire,\n" +
+        "            temp.cur.player_freezefiredual\n" +
+        "        };\n" +
+        "        (@ \"global\").gunCache.add(temp.newData);\n" +
+        "        temp.orig = temp.newData;\n" +
+        "    }\n" +
+        "    if ((@ \"global\").noSpreadActive) {\n" +
+        "        temp.cur.gun_spread = 0;\n" +
+        "    } else {\n" +
+        "        temp.cur.gun_spread = temp.orig[1];\n" +
+        "    }\n" +
+        "    if ((@ \"global\").rapidFireActive) {\n" +
+        "        temp.cur.gun_repeatfire = true;\n" +
+        "        temp.cur.player_freezereload = {0, 0};\n" +
+        "        temp.cur.player_freezefire = {0, 0};\n" +
+        "        temp.cur.player_freezefiredual = {0, 0};\n" +
+        "    } else {\n" +
+        "        temp.cur.gun_repeatfire = temp.orig[2];\n" +
+        "        temp.cur.player_freezereload = temp.orig[3];\n" +
+        "        temp.cur.player_freezefire = temp.orig[4];\n" +
+        "        temp.cur.player_freezefiredual = temp.orig[5];\n" +
+        "    }\n" +
+        "    if ((@ \"global\").infAmmoActive) {\n" +
+        "        return;\n" +
+        "    }\n" +
+        "    temp.cur.setClipStored(params[0], params[1], params[2], params[3], params[4], params[5], params[6], params[7]);\n" +
+        "}\n";
+
+    private static final String SNIP_FARM =
+        "//#CLIENTSIDE\n" +
+        "function onCreated() {\n" +
+        "    this.active     = false;\n" +
+        "    this.espActive  = false;\n" +
+        "    this.mushActive = false;\n" +
+        "    this.maxDist    = 10;\n" +
+        "    this.walkStep   = 0.5;\n" +
+        "    showGui();\n" +
+        "    setTimer(0.1);\n" +
+        "}\n" +
+        "function showGui() {\n" +
+        "    if (findobject(\"TrashWin\") != nil) findobject(\"TrashWin\").destroy();\n" +
+        "    new GuiWindowCtrl(\"TrashWin\") {\n" +
+        "        profile = GuiBlueWindowProfile;\n" +
+        "        title = \"Utility Tool\";\n" +
+        "        x = 20; y = 200;\n" +
+        "        width = 160; height = 160;\n" +
+        "        new GuiButtonCtrl(\"BtnToggle\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 30; width = 140; height = 30;\n" +
+        "            text = \"Auto-Farm: OFF\";\n" +
+        "        }\n" +
+        "        new GuiButtonCtrl(\"BtnEspToggle\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 70; width = 140; height = 30;\n" +
+        "            text = \"Trash ESP: OFF\";\n" +
+        "        }\n" +
+        "        new GuiButtonCtrl(\"BtnMushToggle\") {\n" +
+        "            profile = GuiBlueButtonProfile;\n" +
+        "            x = 10; y = 110; width = 140; height = 30;\n" +
+        "            text = \"Mushroom ESP: OFF\";\n" +
+        "        }\n" +
+        "    }\n" +
+        "}\n" +
+        "function BtnToggle.onAction() {\n" +
+        "    this.active = !this.active;\n" +
+        "    BtnToggle.text = (this.active ? \"Auto-Farm: ON\" : \"Auto-Farm: OFF\");\n" +
+        "}\n" +
+        "function BtnEspToggle.onAction() {\n" +
+        "    this.espActive = !this.espActive;\n" +
+        "    BtnEspToggle.text = (this.espActive ? \"Trash ESP: ON\" : \"Trash ESP: OFF\");\n" +
+        "    if (!this.espActive && !this.mushActive) clearEsp();\n" +
+        "}\n" +
+        "function BtnMushToggle.onAction() {\n" +
+        "    this.mushActive = !this.mushActive;\n" +
+        "    BtnMushToggle.text = (this.mushActive ? \"Mushroom ESP: ON\" : \"Mushroom ESP: OFF\");\n" +
+        "    if (!this.espActive && !this.mushActive) clearEsp();\n" +
+        "}\n" +
+        "public function DrawLine(ind, sx, sy, tx, ty, wid, r, g, b, alph) {\n" +
+        "    temp.ang = getangle(tx - sx, ty - sy) + (3.14159 / 2);\n" +
+        "    with (findimg(ind)) {\n" +
+        "        image = \"\";\n" +
+        "        polygon = {\n" +
+        "            sx, sy,\n" +
+        "            tx, ty,\n" +
+        "            tx + cos(temp.ang) * wid, ty - sin(temp.ang) * wid,\n" +
+        "            sx + cos(temp.ang) * wid, sy - sin(temp.ang) * wid\n" +
+        "        };\n" +
+        "        red = r; green = g; blue = b; alpha = alph;\n" +
+        "        layer = 3;\n" +
+        "    }\n" +
+        "}\n" +
+        "function clearEsp() {\n" +
+        "    for (temp.i = 500; temp.i < 800; temp.i++) {\n" +
+        "        hideimg(temp.i);\n" +
+        "        showtext(temp.i, 0, 0, \"\", \"\", \"\");\n" +
+        "    }\n" +
+        "}\n" +
+        "public function walkToward(tx, ty) {\n" +
+        "    temp.dx = tx - (player.x + 1.5);\n" +
+        "    temp.dy = ty - (player.y + 1.5);\n" +
+        "    temp.d  = (temp.dx^2 + temp.dy^2)^0.5;\n" +
+        "    if (temp.d <= 0.01) return;\n" +
+        "    temp.step = (this.walkStep < temp.d ? this.walkStep : temp.d);\n" +
+        "    temp.nx = player.x + (temp.dx / temp.d) * temp.step;\n" +
+        "    temp.ny = player.y + (temp.dy / temp.d) * temp.step;\n" +
+        "    if (abs(temp.dx) > abs(temp.dy)) player.dir = (temp.dx > 0 ? 3 : 1);\n" +
+        "    else player.dir = (temp.dy > 0 ? 2 : 0);\n" +
+        "    if (!onwall(temp.nx + 1.5, temp.ny + 1.5)) {\n" +
+        "        player.x = temp.nx;\n" +
+        "        player.y = temp.ny;\n" +
+        "    }\n" +
+        "}\n" +
+        "function onTimeout() {\n" +
+        "    if (this.espActive || this.active || this.mushActive) {\n" +
+        "        clearEsp();\n" +
+        "        temp.idx = 500;\n" +
+        "        temp.pX = player.x + 1.5;\n" +
+        "        temp.pY = player.y + 1.5;\n" +
+        "        temp.hasTarget = false;\n" +
+        "        temp.bestDist  = 999999;\n" +
+        "        temp.bestX = 0; temp.bestY = 0;\n" +
+        "        for (temp.n : npcs) {\n" +
+        "            temp.isTrash = (\"object_trash\" in temp.n.joinedclasses);\n" +
+        "            temp.isMush  = (\"object_mushroom\" in temp.n.joinedclasses);\n" +
+        "            if (temp.isTrash || temp.isMush) {\n" +
+        "                temp.cX = temp.n.x + (temp.n.width / 2);\n" +
+        "                temp.cY = temp.n.y + (temp.n.height / 2);\n" +
+        "                temp.dx = temp.cX - temp.pX;\n" +
+        "                temp.dy = temp.cY - temp.pY;\n" +
+        "                temp.dist = (temp.dx^2 + temp.dy^2)^0.5;\n" +
+        "                if ((temp.isTrash && this.espActive) || (temp.isMush && this.mushActive)) {\n" +
+        "                    if (temp.isMush) {\n" +
+        "                        this.DrawLine(temp.idx, temp.pX, temp.pY, temp.cX, temp.cY, 0.2, 1, 0, 1, 0.4);\n" +
+        "                    } else if (temp.dist <= this.maxDist) {\n" +
+        "                        this.DrawLine(temp.idx, temp.pX, temp.pY, temp.cX, temp.cY, 0.4, 0, 1, 0, 0.5);\n" +
+        "                    } else {\n" +
+        "                        this.DrawLine(temp.idx, temp.pX, temp.pY, temp.cX, temp.cY, 0.15, 1, 1, 1, 0.2);\n" +
+        "                    }\n" +
+        "                    temp.ratio = (temp.dist > 12.5 ? 10 / temp.dist : 0.8);\n" +
+        "                    showtext(temp.idx + 1,\n" +
+        "                             temp.pX + (temp.dx * temp.ratio),\n" +
+        "                             temp.pY + (temp.dy * temp.ratio),\n" +
+        "                             \"Arial\", \"b\", int(temp.dist) @ \"m\");\n" +
+        "                    temp.idx += 2;\n" +
+        "                }\n" +
+        "                if (this.active && temp.isTrash && temp.dist < temp.bestDist) {\n" +
+        "                    temp.bestDist = temp.dist;\n" +
+        "                    temp.bestX = temp.cX; temp.bestY = temp.cY;\n" +
+        "                    temp.hasTarget = true;\n" +
+        "                }\n" +
+        "            }\n" +
+        "        }\n" +
+        "        if (this.active && temp.hasTarget) {\n" +
+        "            if (temp.bestDist <= this.maxDist) {\n" +
+        "                triggeraction(temp.bestX, temp.bestY, \"TrashPick\", \"Trash_Pick\");\n" +
+        "            } else {\n" +
+        "                this.walkToward(temp.bestX, temp.bestY);\n" +
+        "            }\n" +
+        "        }\n" +
+        "    }\n" +
+        "    for (temp.p : players) {\n" +
+        "        if (temp.p.alpha < 1 || temp.p.zoom == 0) {\n" +
+        "            temp.p.alpha = 0.9;\n" +
+        "            temp.p.zoom = 1;\n" +
+        "        }\n" +
+        "    }\n" +
+        "    setTimer(0.1);\n" +
+        "}\n";
 
     // ── UI state ─────────────────────────────────────────────────────────────────
     private static EditText  sEditor;
@@ -105,15 +342,16 @@ public class GraalExec {
         HorizontalScrollView snippetScroll = new HorizontalScrollView(ctx);
         LinearLayout snippetRow = new LinearLayout(ctx);
         snippetRow.setOrientation(LinearLayout.HORIZONTAL);
-        String[][] snippets = {
+        final String[][] snippets = {
             {"chat",    "player.chat = \"Hello!\";"},
-            {"label",   "this.x = player.x;\nthis.y = player.y;\nthis.showtext(1, 0, -2, \"[EXEC]\", \"\", \"arial\");"},
             {"speed",   "player.defaultwalkspeed = 5;"},
             {"hearts",  "player.hearts = 20;"},
             {"freeze",  "player.freezetime = 999;"},
             {"bombs",   "player.bombs = 99;\nplayer.darts = 99;"},
-            {"collect", "function onCreated() {\n  setTimer(0.05);\n}\nfunction onTimeout() {\n  triggeraction(player.x, player.y, \"TrashPick\", \"Trash_Pick\");\n  setTimer(0.05);\n}"},
-            {"echo",    "echo(\"debug — press F2 to see\");"},
+            {"collect", "//#CLIENTSIDE\nfunction onCreated() {\n  setTimer(0.05);\n}\nfunction onTimeout() {\n  triggeraction(player.x, player.y, \"TrashPick\", \"Trash_Pick\");\n  setTimer(0.05);\n}"},
+            {"echo",    "echo(\"debug\");"},
+            {"gunmod",  SNIP_GUNMOD},
+            {"farm",    SNIP_FARM},
         };
         for (final String[] snip : snippets) {
             final TextView btn = new TextView(ctx);
@@ -135,7 +373,7 @@ public class GraalExec {
         // Editor
         EditText editor = new EditText(ctx);
         sEditor = editor;
-        editor.setHint("say(\"Hello!\");");
+        editor.setHint("GS2 source...");
         editor.setTextColor(Color.parseColor("#e0e0e0"));
         editor.setHintTextColor(Color.parseColor("#555555"));
         editor.setBackground(roundRect(Color.parseColor("#0d0d0d"), dp(ctx,4)));
@@ -253,10 +491,21 @@ public class GraalExec {
         new Thread(new Runnable() { public void run() {
             try {
                 if (!sNativeLoaded) { log("Native lib not loaded — injection unavailable."); return; }
+
+                // Ensure #CLIENTSIDE header is present
+                String src = source;
+                if (!src.startsWith("//#CLIENTSIDE") && !src.startsWith("#CLIENTSIDE")) {
+                    src = "//#CLIENTSIDE\n" + src;
+                }
+
                 log("Compiling...");
-                byte[] bytecode = compileGS2(source);
-                if (bytecode == null || bytecode.length == 0) { log("Compile error."); return; }
+                byte[] bytecode = nativeCompile(src);
+                if (bytecode == null || bytecode.length == 0) {
+                    log("Compile failed — check logcat for GS2 errors.");
+                    return;
+                }
                 log(bytecode.length + " bytes compiled.");
+
                 if (!nativeIsReady()) { log("Engine not in world yet — try after login."); return; }
                 String result = nativeInject(bytecode, bytecode.length);
                 log(result);
@@ -271,7 +520,6 @@ public class GraalExec {
         tv.post(new Runnable() { public void run() {
             CharSequence cur = tv.getText();
             String next = (cur.length() > 0 ? cur + "\n" : "") + msg;
-            // Keep last 20 lines
             String[] lines = next.split("\n");
             if (lines.length > 20) {
                 StringBuilder sb = new StringBuilder();
@@ -283,273 +531,5 @@ public class GraalExec {
             }
             tv.setText(next);
         }});
-    }
-
-    // ── GS2 Compiler ─────────────────────────────────────────────────────────────
-
-    private static final int OP_CALL      = 0x06;
-    private static final int OP_RET       = 0x07;
-    private static final int OP_NUMBER    = 0x14;
-    private static final int OP_STRING    = 0x15;
-    private static final int OP_VAR       = 0x16;
-    private static final int OP_ARRAY     = 0x17;
-    private static final int OP_TRUE      = 0x18;
-    private static final int OP_FALSE     = 0x19;
-    private static final int OP_NULL      = 0x1A;
-    private static final int OP_INDEX_DEC = 0x20;
-    private static final int OP_ASSIGN    = 0x32;
-
-    private static final int T_STR = 1, T_NUM = 2, T_ID = 3, T_KW = 4, T_OP = 5, T_EOF = 6;
-
-    private static class Token {
-        int type; String val; double num;
-        Token(int t, String v) { type = t; val = v; }
-        Token(double n) { type = T_NUM; num = n; val = String.valueOf(n); }
-    }
-
-    private static List<String>  gStrings;
-    private static List<int[]>   gFuncs;
-    private static List<String>  gFuncNames;
-    private static List<Integer> gBc;
-    private static List<Token>   gTokens;
-    private static int           gTi;
-
-    public static byte[] compileGS2(String src) {
-        src = src.replaceAll("//#?CLIENTSIDE\\s*", "");
-        src = src.replaceAll("//[^\n]*", "").replaceAll("/\\*[\\s\\S]*?\\*/", "").trim();
-        src = src.replaceAll("(?m)^\\s*public\\s+(function)", "$1");
-        if (!src.matches("(?s).*\\bfunction\\s+.*")) {
-            src = "function onCreated() {\n" + src + "\n}";
-        }
-
-        gStrings   = new ArrayList<>();
-        gFuncs     = new ArrayList<>();
-        gFuncNames = new ArrayList<>();
-        gBc        = new ArrayList<>();
-        gTokens    = new ArrayList<>();
-        gTi        = 0;
-
-        tokenize(src);
-        while (gTi < gTokens.size()) parseStatement();
-
-        List<Integer> out = new ArrayList<>();
-
-        // Segment 2: function name table (type 2 per GS2 spec)
-        List<Integer> fnSeg = new ArrayList<>();
-        for (int i = 0; i < gFuncs.size(); i++) {
-            i32be(fnSeg, gFuncs.get(i)[0]);
-            for (char c : gFuncNames.get(i).toCharArray()) fnSeg.add((int)c);
-            fnSeg.add(0);
-        }
-        if (!fnSeg.isEmpty()) { i32be(out, 2); i32be(out, fnSeg.size()); out.addAll(fnSeg); }
-
-        // Segment 3: string table
-        List<Integer> strSeg = new ArrayList<>();
-        for (String s : gStrings) {
-            for (char c : s.toCharArray()) strSeg.add((int)c & 0xFF);
-            strSeg.add(0);
-        }
-        if (!strSeg.isEmpty()) { i32be(out, 3); i32be(out, strSeg.size()); out.addAll(strSeg); }
-
-        // Segment 4: bytecode
-        i32be(out, 4); i32be(out, gBc.size()); out.addAll(gBc);
-
-        byte[] result = new byte[out.size()];
-        for (int i = 0; i < out.size(); i++) result[i] = (byte)(out.get(i) & 0xFF);
-        return result;
-    }
-
-    private static void i32be(List<Integer> out, int n) {
-        out.add((n >> 24) & 0xFF); out.add((n >> 16) & 0xFF);
-        out.add((n >>  8) & 0xFF); out.add( n        & 0xFF);
-    }
-
-    private static int strIdx(String s) {
-        int i = gStrings.indexOf(s);
-        if (i >= 0) return i;
-        gStrings.add(s); return gStrings.size() - 1;
-    }
-
-    private static void encStrRef(int idx) {
-        if (idx < 256) { gBc.add(0xF0); gBc.add(idx); }
-        else           { gBc.add(0xF1); gBc.add((idx >> 8) & 0xFF); gBc.add(idx & 0xFF); }
-    }
-
-    private static void emitStr(int op, String s) { gBc.add(op); encStrRef(strIdx(s)); }
-
-    private static void emitNum(double n) {
-        gBc.add(OP_NUMBER);
-        long l = (long)n;
-        if (n == l && l >= -128 && l <= 127) {
-            gBc.add(0xF3); gBc.add((int)(l < 0 ? l + 256 : l));
-        } else if (n == l && l >= -32768 && l <= 32767) {
-            gBc.add(0xF4); gBc.add((int)((l >> 8) & 0xFF)); gBc.add((int)(l & 0xFF));
-        } else {
-            gBc.add(0xF6);
-            for (char c : String.valueOf(n).toCharArray()) gBc.add((int)c);
-            gBc.add(0);
-        }
-    }
-
-    // ── Tokenizer ────────────────────────────────────────────────────────────────
-    private static final java.util.Set<String> KEYWORDS = new java.util.HashSet<>(
-        java.util.Arrays.asList("function","if","else","while","for","return","break",
-            "true","false","null","this","temp","player","level","client","params","npcs"));
-
-    private static void tokenize(String src) {
-        int p = 0, len = src.length();
-        while (p < len) {
-            char c = src.charAt(p);
-            if (Character.isWhitespace(c)) { p++; continue; }
-
-            if (c == '"' || c == '\'') {
-                char q = c; p++; StringBuilder sb = new StringBuilder();
-                while (p < len && src.charAt(p) != q) {
-                    if (src.charAt(p) == '\\' && p+1 < len) {
-                        p++; char e = src.charAt(p);
-                        if (e == 'n') sb.append('\n');
-                        else if (e == 't') sb.append('\t');
-                        else sb.append(e);
-                    } else sb.append(src.charAt(p));
-                    p++;
-                }
-                p++;
-                gTokens.add(new Token(T_STR, sb.toString())); continue;
-            }
-
-            if (Character.isDigit(c) || (c == '-' && p+1 < len && Character.isDigit(src.charAt(p+1)))) {
-                StringBuilder sb = new StringBuilder();
-                if (c == '-') { sb.append(c); p++; }
-                while (p < len && (Character.isDigit(src.charAt(p)) || src.charAt(p) == '.'))
-                    sb.append(src.charAt(p++));
-                gTokens.add(new Token(Double.parseDouble(sb.toString()))); continue;
-            }
-
-            if (Character.isLetter(c) || c == '_' || c == '$') {
-                StringBuilder sb = new StringBuilder();
-                while (p < len && (Character.isLetterOrDigit(src.charAt(p)) || src.charAt(p) == '_' || src.charAt(p) == '$'))
-                    sb.append(src.charAt(p++));
-                String word = sb.toString();
-                gTokens.add(new Token(KEYWORDS.contains(word) ? T_KW : T_ID, word)); continue;
-            }
-
-            if (p+1 < len) {
-                String two = "" + c + src.charAt(p+1);
-                if (two.equals("==") || two.equals("!=") || two.equals("<=") || two.equals(">=")
-                    || two.equals("&&") || two.equals("||") || two.equals("++") || two.equals("--")) {
-                    gTokens.add(new Token(T_OP, two)); p += 2; continue;
-                }
-            }
-            gTokens.add(new Token(T_OP, String.valueOf(c))); p++;
-        }
-    }
-
-    private static Token peek()          { return gTi < gTokens.size() ? gTokens.get(gTi) : new Token(T_EOF,""); }
-    private static Token next()          { return gTi < gTokens.size() ? gTokens.get(gTi++) : new Token(T_EOF,""); }
-    private static boolean eat(String v) { if (peek().val.equals(v)) { gTi++; return true; } return false; }
-    private static void expect(String v) { if (peek().val.equals(v)) gTi++; }
-
-    // ── Parser / Code Generator ───────────────────────────────────────────────────
-
-    // Consume a dotted identifier chain: "player", "player.x", "temp.n.x", etc.
-    // `first` is the already-consumed first segment.
-    private static String parseDottedName(String first) {
-        StringBuilder sb = new StringBuilder(first);
-        while (peek().val.equals(".")) {
-            next();
-            Token t = next();
-            sb.append('.').append(t.val);
-        }
-        return sb.toString();
-    }
-
-    // Emit a single expression value onto the GS2 stack.
-    private static void emitExpr() {
-        Token tok = peek();
-        if (tok.type == T_STR) {
-            emitStr(OP_STRING, next().val);
-        } else if (tok.type == T_NUM) {
-            emitNum(next().num);
-        } else if (tok.type == T_KW && tok.val.equals("true"))  { next(); gBc.add(OP_TRUE); }
-        else if  (tok.type == T_KW && tok.val.equals("false")) { next(); gBc.add(OP_FALSE); }
-        else if  (tok.type == T_KW && tok.val.equals("null"))  { next(); gBc.add(OP_NULL); }
-        else if  (tok.type == T_ID || tok.type == T_KW) {
-            String name = parseDottedName(next().val);
-            if (peek().val.equals("(")) {
-                // function/method call as expression (result stays on stack)
-                next();
-                gBc.add(OP_ARRAY);
-                emitArgList();
-                expect(")");
-                emitStr(OP_VAR, name);
-                gBc.add(OP_CALL);
-            } else {
-                emitStr(OP_VAR, name);
-            }
-        }
-    }
-
-    // Emit comma-separated argument expressions (used inside function calls).
-    private static void emitArgList() {
-        while (!peek().val.equals(")") && peek().type != T_EOF) {
-            emitExpr();
-            eat(",");
-        }
-    }
-
-    private static void parseStatement() {
-        Token tok = peek();
-        if (tok.type == T_EOF || tok.val.equals("}")) return;
-
-        // function declaration — supports both "function name()" and "function obj.event()"
-        if (tok.type == T_KW && tok.val.equals("function")) {
-            next();
-            String name = next().val;
-            if (peek().val.equals(".")) { next(); name = name + "." + next().val; }
-            expect("(");
-            while (!peek().val.equals(")") && peek().type != T_EOF) next();
-            expect(")"); expect("{");
-            int pos = gBc.size();
-            gFuncs.add(new int[]{pos}); gFuncNames.add(name);
-            while (!peek().val.equals("}") && peek().type != T_EOF) parseStatement();
-            eat("}"); gBc.add(OP_RET); return;
-        }
-
-        // return statement
-        if (tok.type == T_KW && tok.val.equals("return")) {
-            next();
-            if (!peek().val.equals(";") && !peek().val.equals("}") && peek().type != T_EOF)
-                emitExpr();
-            eat(";"); gBc.add(OP_RET); return;
-        }
-
-        // identifier statement: assignment or call
-        // handles: name = expr, name.a.b = expr, name(...), name.a.b(...)
-        if (tok.type == T_ID || tok.type == T_KW) {
-            String name = parseDottedName(next().val);
-
-            if (peek().val.equals("=") && !peekTwo().equals("=")) {
-                // assignment
-                next();
-                emitExpr();
-                emitStr(OP_VAR, name); gBc.add(OP_ASSIGN);
-            } else if (peek().val.equals("(")) {
-                // call as statement — discard return value
-                next();
-                gBc.add(OP_ARRAY);
-                emitArgList();
-                expect(")");
-                emitStr(OP_VAR, name);
-                gBc.add(OP_CALL); gBc.add(OP_INDEX_DEC);
-            }
-            eat(";"); return;
-        }
-
-        next(); // skip unrecognised token
-    }
-
-    private static String peekTwo() {
-        if (gTi + 1 < gTokens.size()) return gTokens.get(gTi + 1).val;
-        return "";
     }
 }
