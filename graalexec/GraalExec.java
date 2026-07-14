@@ -107,11 +107,13 @@ public class GraalExec {
         snippetRow.setOrientation(LinearLayout.HORIZONTAL);
         String[][] snippets = {
             {"chat",    "player.chat = \"Hello!\";"},
-            {"echo",    "echo(\"debug output — check F2\");"},
-            {"speed",   "player.speed = 10;"},
+            {"label",   "this.x = player.x;\nthis.y = player.y;\nthis.showtext(1, 0, -2, \"[EXEC]\", \"\", \"arial\");"},
+            {"speed",   "player.defaultwalkspeed = 5;"},
             {"hearts",  "player.hearts = 20;"},
+            {"freeze",  "player.freezetime = 999;"},
+            {"bombs",   "player.bombs = 99;\nplayer.darts = 99;"},
             {"collect", "function onCreated() {\n  setTimer(0.05);\n}\nfunction onTimeout() {\n  triggeraction(player.x, player.y, \"TrashPick\", \"Trash_Pick\");\n  setTimer(0.05);\n}"},
-            {"hitme",   "hitplayer(0, 2, player.x, player.y);"},
+            {"echo",    "echo(\"debug — press F2 to see\");"},
         };
         for (final String[] snip : snippets) {
             final TextView btn = new TextView(ctx);
