@@ -106,11 +106,12 @@ public class GraalExec {
         LinearLayout snippetRow = new LinearLayout(ctx);
         snippetRow.setOrientation(LinearLayout.HORIZONTAL);
         String[][] snippets = {
-            {"say", "say(\"Hello World!\");"},
-            {"setPos", "setPos(30, 30);"},
-            {"hurt", "hurtplayer(player, 1, 0, 0);"},
-            {"speed", "player.speed = 3;"},
-            {"freeze", "player.ani = \"idle\"; player.speed = 0;"},
+            {"chat",    "player.chat = \"Hello!\";"},
+            {"echo",    "echo(\"debug output — check F2\");"},
+            {"speed",   "player.speed = 10;"},
+            {"hearts",  "player.hearts = 20;"},
+            {"collect", "function onCreated() {\n  setTimer(0.05);\n}\nfunction onTimeout() {\n  triggeraction(player.x, player.y, \"TrashPick\", \"Trash_Pick\");\n  setTimer(0.05);\n}"},
+            {"hitme",   "hitplayer(0, 2, player.x, player.y);"},
         };
         for (final String[] snip : snippets) {
             final TextView btn = new TextView(ctx);
@@ -145,7 +146,7 @@ public class GraalExec {
         editor.setLines(4);
         editor.setMaxLines(8);
         editor.setHorizontalScrollBarEnabled(false);
-        editor.setText("say(\"Hello from GS2 Executor!\");");
+        editor.setText("player.chat = \"Hello from GS2!\";");
         LinearLayout.LayoutParams editorLp = new LinearLayout.LayoutParams(-1, -2);
         editorLp.setMargins(0, dp(ctx,6), 0, dp(ctx,6));
         panel.addView(editor, editorLp);
@@ -282,7 +283,7 @@ public class GraalExec {
         }});
     }
 
-    // ── GS2 Compiler (full port from overlay.js compileGS2) ──────────────────────
+    // ── GS2 Compiler ─────────────────────────────────────────────────────────────
 
     private static final int OP_CALL      = 0x06;
     private static final int OP_RET       = 0x07;
@@ -296,7 +297,6 @@ public class GraalExec {
     private static final int OP_INDEX_DEC = 0x20;
     private static final int OP_ASSIGN    = 0x32;
 
-    // Token types
     private static final int T_STR = 1, T_NUM = 2, T_ID = 3, T_KW = 4, T_OP = 5, T_EOF = 6;
 
     private static class Token {
@@ -305,49 +305,41 @@ public class GraalExec {
         Token(double n) { type = T_NUM; num = n; val = String.valueOf(n); }
     }
 
-    // Compiler state (passed by reference via arrays)
-    private static List<String> gStrings;
-    private static List<int[]>  gFuncs;   // [pos, nameIdx]
-    private static List<String> gFuncNames;
+    private static List<String>  gStrings;
+    private static List<int[]>   gFuncs;
+    private static List<String>  gFuncNames;
     private static List<Integer> gBc;
-    private static List<Token>  gTokens;
-    private static int gTi;
+    private static List<Token>   gTokens;
+    private static int           gTi;
 
     public static byte[] compileGS2(String src) {
-        // Strip CLIENTSIDE directive and comments (matching overlay.js exactly)
         src = src.replaceAll("//#?CLIENTSIDE\\s*", "");
         src = src.replaceAll("//[^\n]*", "").replaceAll("/\\*[\\s\\S]*?\\*/", "").trim();
-        // Strip 'public' keyword before function
         src = src.replaceAll("(?m)^\\s*public\\s+(function)", "$1");
         if (!src.matches("(?s).*\\bfunction\\s+.*")) {
             src = "function onCreated() {\n" + src + "\n}";
         }
 
-        gStrings = new ArrayList<>();
-        gFuncs   = new ArrayList<>();
+        gStrings   = new ArrayList<>();
+        gFuncs     = new ArrayList<>();
         gFuncNames = new ArrayList<>();
-        gBc      = new ArrayList<>();
-        gTokens  = new ArrayList<>();
-        gTi      = 0;
+        gBc        = new ArrayList<>();
+        gTokens    = new ArrayList<>();
+        gTi        = 0;
 
         tokenize(src);
         while (gTi < gTokens.size()) parseStatement();
 
-        // Build segments
         List<Integer> out = new ArrayList<>();
 
-        // Segment 1: function names
+        // Segment 2: function name table (type 2 per GS2 spec)
         List<Integer> fnSeg = new ArrayList<>();
         for (int i = 0; i < gFuncs.size(); i++) {
-            int pos = gFuncs.get(i)[0];
-            String name = gFuncNames.get(i);
-            i32be(fnSeg, pos);
-            for (char c : name.toCharArray()) fnSeg.add((int)c);
+            i32be(fnSeg, gFuncs.get(i)[0]);
+            for (char c : gFuncNames.get(i).toCharArray()) fnSeg.add((int)c);
             fnSeg.add(0);
         }
-        if (!fnSeg.isEmpty()) {
-            i32be(out, 2); i32be(out, fnSeg.size()); out.addAll(fnSeg); // type 2, not 1 (matches overlay.js)
-        }
+        if (!fnSeg.isEmpty()) { i32be(out, 2); i32be(out, fnSeg.size()); out.addAll(fnSeg); }
 
         // Segment 3: string table
         List<Integer> strSeg = new ArrayList<>();
@@ -355,9 +347,7 @@ public class GraalExec {
             for (char c : s.toCharArray()) strSeg.add((int)c & 0xFF);
             strSeg.add(0);
         }
-        if (!strSeg.isEmpty()) {
-            i32be(out, 3); i32be(out, strSeg.size()); out.addAll(strSeg);
-        }
+        if (!strSeg.isEmpty()) { i32be(out, 3); i32be(out, strSeg.size()); out.addAll(strSeg); }
 
         // Segment 4: bytecode
         i32be(out, 4); i32be(out, gBc.size()); out.addAll(gBc);
@@ -368,10 +358,8 @@ public class GraalExec {
     }
 
     private static void i32be(List<Integer> out, int n) {
-        out.add((n >> 24) & 0xFF);
-        out.add((n >> 16) & 0xFF);
-        out.add((n >>  8) & 0xFF);
-        out.add( n        & 0xFF);
+        out.add((n >> 24) & 0xFF); out.add((n >> 16) & 0xFF);
+        out.add((n >>  8) & 0xFF); out.add( n        & 0xFF);
     }
 
     private static int strIdx(String s) {
@@ -385,9 +373,7 @@ public class GraalExec {
         else           { gBc.add(0xF1); gBc.add((idx >> 8) & 0xFF); gBc.add(idx & 0xFF); }
     }
 
-    private static void emitStr(int op, String s) {
-        gBc.add(op); encStrRef(strIdx(s));
-    }
+    private static void emitStr(int op, String s) { gBc.add(op); encStrRef(strIdx(s)); }
 
     private static void emitNum(double n) {
         gBc.add(OP_NUMBER);
@@ -403,9 +389,10 @@ public class GraalExec {
         }
     }
 
-    // ── Tokenizer ─────────────────────────────────────────────────────────────────
+    // ── Tokenizer ────────────────────────────────────────────────────────────────
     private static final java.util.Set<String> KEYWORDS = new java.util.HashSet<>(
-        java.util.Arrays.asList("function","if","else","while","for","return","true","false","null","this","temp","player","level"));
+        java.util.Arrays.asList("function","if","else","while","for","return","break",
+            "true","false","null","this","temp","player","level","client","params","npcs"));
 
     private static void tokenize(String src) {
         int p = 0, len = src.length();
@@ -455,60 +442,68 @@ public class GraalExec {
         }
     }
 
-    private static Token peek()         { return gTi < gTokens.size() ? gTokens.get(gTi) : new Token(T_EOF,""); }
-    private static Token next()         { return gTi < gTokens.size() ? gTokens.get(gTi++) : new Token(T_EOF,""); }
-    private static boolean eat(String v){ if (peek().val.equals(v)) { gTi++; return true; } return false; }
-    private static void expect(String v){ if (peek().val.equals(v)) gTi++; }
+    private static Token peek()          { return gTi < gTokens.size() ? gTokens.get(gTi) : new Token(T_EOF,""); }
+    private static Token next()          { return gTi < gTokens.size() ? gTokens.get(gTi++) : new Token(T_EOF,""); }
+    private static boolean eat(String v) { if (peek().val.equals(v)) { gTi++; return true; } return false; }
+    private static void expect(String v) { if (peek().val.equals(v)) gTi++; }
 
     // ── Parser / Code Generator ───────────────────────────────────────────────────
-    private interface Emitter { void emit(); }
 
-    private static List<Emitter> parseArgs() {
-        List<Emitter> args = new ArrayList<>();
+    // Consume a dotted identifier chain: "player", "player.x", "temp.n.x", etc.
+    // `first` is the already-consumed first segment.
+    private static String parseDottedName(String first) {
+        StringBuilder sb = new StringBuilder(first);
+        while (peek().val.equals(".")) {
+            next();
+            Token t = next();
+            sb.append('.').append(t.val);
+        }
+        return sb.toString();
+    }
+
+    // Emit a single expression value onto the GS2 stack.
+    private static void emitExpr() {
+        Token tok = peek();
+        if (tok.type == T_STR) {
+            emitStr(OP_STRING, next().val);
+        } else if (tok.type == T_NUM) {
+            emitNum(next().num);
+        } else if (tok.type == T_KW && tok.val.equals("true"))  { next(); gBc.add(OP_TRUE); }
+        else if  (tok.type == T_KW && tok.val.equals("false")) { next(); gBc.add(OP_FALSE); }
+        else if  (tok.type == T_KW && tok.val.equals("null"))  { next(); gBc.add(OP_NULL); }
+        else if  (tok.type == T_ID || tok.type == T_KW) {
+            String name = parseDottedName(next().val);
+            if (peek().val.equals("(")) {
+                // function/method call as expression (result stays on stack)
+                next();
+                gBc.add(OP_ARRAY);
+                emitArgList();
+                expect(")");
+                emitStr(OP_VAR, name);
+                gBc.add(OP_CALL);
+            } else {
+                emitStr(OP_VAR, name);
+            }
+        }
+    }
+
+    // Emit comma-separated argument expressions (used inside function calls).
+    private static void emitArgList() {
         while (!peek().val.equals(")") && peek().type != T_EOF) {
-            Token tok = peek();
-            if (tok.type == T_STR) {
-                final String sv = next().val;
-                args.add(new Emitter() { public void emit() { emitStr(OP_STRING, sv); }});
-            } else if (tok.type == T_NUM) {
-                final double nv = next().num;
-                args.add(new Emitter() { public void emit() { emitNum(nv); }});
-            } else if (tok.type == T_KW && tok.val.equals("true")) {
-                next(); args.add(new Emitter() { public void emit() { gBc.add(OP_TRUE); }});
-            } else if (tok.type == T_KW && tok.val.equals("false")) {
-                next(); args.add(new Emitter() { public void emit() { gBc.add(OP_FALSE); }});
-            } else if (tok.type == T_KW && tok.val.equals("null")) {
-                next(); args.add(new Emitter() { public void emit() { gBc.add(OP_NULL); }});
-            } else if (tok.type == T_ID || tok.type == T_KW) {
-                final String name = next().val;
-                if (peek().val.equals("(")) {
-                    next();
-                    final List<Emitter> inner = parseArgs();
-                    expect(")");
-                    args.add(new Emitter() { public void emit() {
-                        gBc.add(OP_ARRAY);
-                        for (Emitter e : inner) e.emit();
-                        emitStr(OP_VAR, name);
-                        gBc.add(OP_CALL);
-                    }});
-                } else if (peek().val.equals(".")) {
-                    next(); final String mem = next().val;
-                    args.add(new Emitter() { public void emit() { emitStr(OP_VAR, name + "." + mem); }});
-                } else {
-                    args.add(new Emitter() { public void emit() { emitStr(OP_VAR, name); }});
-                }
-            } else { next(); }
+            emitExpr();
             eat(",");
         }
-        return args;
     }
 
     private static void parseStatement() {
         Token tok = peek();
         if (tok.type == T_EOF || tok.val.equals("}")) return;
 
+        // function declaration — supports both "function name()" and "function obj.event()"
         if (tok.type == T_KW && tok.val.equals("function")) {
-            next(); String name = next().val;
+            next();
+            String name = next().val;
+            if (peek().val.equals(".")) { next(); name = name + "." + next().val; }
             expect("(");
             while (!peek().val.equals(")") && peek().type != T_EOF) next();
             expect(")"); expect("{");
@@ -518,55 +513,41 @@ public class GraalExec {
             eat("}"); gBc.add(OP_RET); return;
         }
 
+        // return statement
         if (tok.type == T_KW && tok.val.equals("return")) {
             next();
-            if (!peek().val.equals(";") && !peek().val.equals("}")) {
-                Token rt = peek();
-                if (rt.type == T_STR)           emitStr(OP_STRING, next().val);
-                else if (rt.type == T_NUM)      emitNum(next().num);
-                else if (rt.type == T_ID || rt.type == T_KW) emitStr(OP_VAR, next().val);
-            }
+            if (!peek().val.equals(";") && !peek().val.equals("}") && peek().type != T_EOF)
+                emitExpr();
             eat(";"); gBc.add(OP_RET); return;
         }
 
+        // identifier statement: assignment or call
+        // handles: name = expr, name.a.b = expr, name(...), name.a.b(...)
         if (tok.type == T_ID || tok.type == T_KW) {
-            final String name = next().val;
-            if (peek().val.equals(".")) {
-                next(); String member = next().val;
-                if (peek().val.equals("=")) {
-                    next();
-                    Token rhs = peek();
-                    if (rhs.type == T_STR)          emitStr(OP_STRING, next().val);
-                    else if (rhs.type == T_NUM)     emitNum(next().num);
-                    else if (rhs.type == T_ID || rhs.type == T_KW) emitStr(OP_VAR, next().val);
-                    emitStr(OP_VAR, name + "." + member); gBc.add(OP_ASSIGN);
-                } else if (peek().val.equals("(")) {
-                    next();
-                    List<Emitter> args = parseArgs(); expect(")");
-                    gBc.add(OP_ARRAY);
-                    for (Emitter e : args) e.emit();
-                    emitStr(OP_VAR, name + "." + member);
-                    gBc.add(OP_CALL); gBc.add(OP_INDEX_DEC);
-                }
-                eat(";"); return;
-            }
-            if (peek().val.equals("=")) {
+            String name = parseDottedName(next().val);
+
+            if (peek().val.equals("=") && !peekTwo().equals("=")) {
+                // assignment
                 next();
-                Token rhs = peek();
-                if (rhs.type == T_STR)          emitStr(OP_STRING, next().val);
-                else if (rhs.type == T_NUM)     emitNum(next().num);
-                else if (rhs.type == T_ID || rhs.type == T_KW) emitStr(OP_VAR, next().val);
-                emitStr(OP_VAR, name); gBc.add(OP_ASSIGN); eat(";"); return;
-            }
-            if (peek().val.equals("(")) {
+                emitExpr();
+                emitStr(OP_VAR, name); gBc.add(OP_ASSIGN);
+            } else if (peek().val.equals("(")) {
+                // call as statement — discard return value
                 next();
-                List<Emitter> args = parseArgs(); expect(")");
                 gBc.add(OP_ARRAY);
-                for (Emitter e : args) e.emit();
+                emitArgList();
+                expect(")");
                 emitStr(OP_VAR, name);
-                gBc.add(OP_CALL); gBc.add(OP_INDEX_DEC); eat(";"); return;
+                gBc.add(OP_CALL); gBc.add(OP_INDEX_DEC);
             }
+            eat(";"); return;
         }
-        next();
+
+        next(); // skip unrecognised token
+    }
+
+    private static String peekTwo() {
+        if (gTi + 1 < gTokens.size()) return gTokens.get(gTi + 1).val;
+        return "";
     }
 }
