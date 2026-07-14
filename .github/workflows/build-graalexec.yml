@@ -65,17 +65,18 @@ jobs:
 
       - name: Baksmali DEX to smali
         run: |
-          # Download baksmali
-          curl -sSL \
-            https://github.com/JesusFreke/smali/releases/download/v2.5.2/baksmali-2.5.2.jar \
+          # Download baksmali from Maven Central (reliable mirror)
+          curl -fsSL \
+            "https://repo1.maven.org/maven2/org/smali/baksmali/2.5.2/baksmali-2.5.2.jar" \
             -o baksmali.jar
+          echo "baksmali.jar size: $(wc -c < baksmali.jar) bytes"
           mkdir -p build/smali
           java -jar baksmali.jar disassemble \
             build/dex/classes.dex \
             -o build/smali
           echo "=== Smali files ==="
           find build/smali -name "*.smali"
-          # Show GraalExec.smali so we can verify it
+          # Print GraalExec.smali for verification
           cat build/smali/com/graal/exec/GraalExec.smali || true
 
       # ── Upload artifacts ──────────────────────────────────────────────────────
