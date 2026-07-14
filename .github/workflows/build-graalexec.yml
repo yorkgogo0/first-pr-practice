@@ -1,0 +1,40 @@
+name: Build libgraalexec.so (ARM64 Android)
+
+on:
+  push:
+    paths:
+      - 'graalexec/graalexec.cpp'
+      - '.github/workflows/build-graalexec.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Android NDK
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.2.12479018" --sdk_root=$ANDROID_HOME
+          echo "NDK_PATH=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      - name: Compile libgraalexec.so for ARM64
+        run: |
+          CXX="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++"
+          SYSROOT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          $CXX \
+            -shared -fPIC -O2 -std=c++17 \
+            --sysroot="$SYSROOT" \
+            -Wl,--hash-style=gnu \
+            -o libgraalexec.so \
+            graalexec/graalexec.cpp \
+            -llog -landroid
+          file libgraalexec.so
+          ls -lh libgraalexec.so
+
+      - name: Upload libgraalexec.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgraalexec-arm64
+          path: libgraalexec.so
+          retention-days: 7
