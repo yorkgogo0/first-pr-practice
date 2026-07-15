@@ -121,19 +121,23 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag v23: READ-ONLY object-model validation ──
-// Verified via capstone RE (see project_graal_native_gs2_re memory):
-//   0x939bd0  = current level / script-scope global (set during script ticks)
-//   0x939bc8  = persistent registry root
-//   level+0xa0 -> actor container; container+0xc = int count; container+0x10 = obj*[]
-//   object+0x80 = bound script instance (non-null ⇒ scriptable / dispatchable)
-// Walks the live actor list and reports which objects carry a bound script and
-// their names. Purely read-only — no engine calls — every deref guarded by mincore().
+// ── nativeDiag v24: READ-ONLY hunt for the real script sub-object ──
+// v23 confirmed on-device: level=*0x939bd0, level+0xa0 -> container (+0xc count,
+// +0x10 obj*[]) holds real 0xb400 heap entities. BUT entity+0x80 is a DOUBLE
+// (coordinate), not the script instance — the scriptable object dispatch runs on
+// is a SUB-OBJECT hanging off each entity. v24 dumps every heap-pointer field of
+// each entity and flags the sub-object whose +0x80 (or +0x60) is itself a heap
+// pointer = the script-object candidate. Purely read-only, mincore()-guarded.
 #include <sys/mman.h>
 
 static bool addr_mapped(uintptr_t addr) {
     unsigned char vec = 0;
     return mincore((void*)(addr & ~(uintptr_t)4095), 4096, &vec) == 0;
+}
+
+// Android Scudo heap pointers have the tag 0xb400 in the top 16 bits.
+static bool is_heap(uintptr_t v) {
+    return v && (v >> 48) == 0xb400 && addr_mapped(v);
 }
 
 // Interpret p as a GraalString [i32 len][i32 ref][utf8], or one level of
@@ -217,23 +221,31 @@ Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
         return env->NewStringUTF(out.c_str());
     }
 
-    int shown = 0, scriptable = 0;
-    for (int i = 0; i < count && shown < 20; i++) {
+    // For the first entities, list every heap-pointer field in [0..0xB8] and
+    // follow each to see if that sub-object is the script object (its +0x80 or
+    // +0x60 is itself a heap pointer = a bound instance / function table).
+    for (int i = 0; i < count && i < 8; i++) {
         if (!addr_mapped((uintptr_t)(arr + i))) break;
         uintptr_t obj = (uintptr_t)arr[i];
         if (!obj || (obj & 7) || !addr_mapped(obj)) continue;
 
-        void* bound = addr_mapped(obj + 0x80) ? *(void**)(obj + 0x80) : nullptr;
         std::string nm = find_name(obj);
-
-        snprintf(tmp, sizeof(tmp), "[%d]%p +80=%p%s %s\n",
-                 i, (void*)obj, bound, bound ? "★" : "", nm.c_str());
+        snprintf(tmp, sizeof(tmp), "[%d]%p %s\n", i, (void*)obj, nm.c_str());
         out += tmp;
-        shown++;
-        if (bound) scriptable++;
+
+        for (uint32_t o = 0; o <= 0xB8; o += 8) {
+            if (!addr_mapped(obj + o)) continue;
+            uintptr_t v = *(uintptr_t*)(obj + o);
+            if (!is_heap(v)) continue;
+
+            uintptr_t s60 = addr_mapped(v + 0x60) ? *(uintptr_t*)(v + 0x60) : 0;
+            uintptr_t s80 = addr_mapped(v + 0x80) ? *(uintptr_t*)(v + 0x80) : 0;
+            std::string sn = find_name(v);
+            const char* mk = is_heap(s80) ? " <SCR80" : (is_heap(s60) ? " <SCR60" : "");
+            snprintf(tmp, sizeof(tmp), "  +%X->%p%s %s\n", o, (void*)v, mk, sn.c_str());
+            out += tmp;
+        }
     }
-    snprintf(tmp, sizeof(tmp), "scriptable(+80): %d/%d\n", scriptable, count);
-    out += tmp;
 
     return env->NewStringUTF(out.c_str());
 }
