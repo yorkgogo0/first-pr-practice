@@ -121,10 +121,17 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag: find which field of ctx points to the object with script manager ──
-// Scan ctx[0..0x1800], keep only heap-pointer-like values, check each at +0xB30.
-// Mark ★ if that sub-pointer's +0xB30 is non-null (= script manager found).
-// Safe: read-only, no engine function calls.
+// ── nativeDiag: find which field of ctx leads to the script manager ──
+// Scan ctx[0..0x1800] for heap-pointer candidates.
+// Use mincore() to verify each candidate is mapped before reading +0xB30.
+// Mark ★ if val+0xB30 is non-null (= script manager found).
+#include <sys/mman.h>
+
+static bool addr_mapped(uintptr_t addr) {
+    unsigned char vec = 0;
+    return mincore((void*)(addr & ~(uintptr_t)4095), 4096, &vec) == 0;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
@@ -134,25 +141,25 @@ Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
 
     std::string out;
     char tmp[96];
-    snprintf(tmp, sizeof(tmp), "ctx=%p B30=%p\n", globalCtx,
-             *(void**)((uint8_t*)globalCtx + 0xB30));
+    snprintf(tmp, sizeof(tmp), "ctx=%p\n", globalCtx);
     out += tmp;
 
-    // Heap pointer range on this Android process (39-bit user space).
-    // Filters out small ints, data arrays, and huge packed values.
     const uintptr_t LO = 0x600000000ULL;
     const uintptr_t HI = 0x7FFFFFFFFFULL;
 
     int hits = 0;
     uintptr_t base = (uintptr_t)globalCtx;
     for (uint32_t off = 0; off < 0x1800 && hits < 30; off += 8) {
+        if (!addr_mapped(base + off)) continue;
         uintptr_t val = *(uintptr_t*)(base + off);
         if (val < LO || val > HI || (val & 7)) continue;
-        // Check B30 of this candidate
-        uintptr_t b30 = *(uintptr_t*)(val + 0xB30);
-        bool star = (b30 != 0);
+
+        uintptr_t b30 = 0;
+        bool b30ok = addr_mapped(val + 0xB30);
+        if (b30ok) b30 = *(uintptr_t*)(val + 0xB30);
+
         snprintf(tmp, sizeof(tmp), "+%X→%p B30=%p%s\n",
-                 off, (void*)val, (void*)b30, star ? "★" : "");
+                 off, (void*)val, (void*)b30, (b30 != 0) ? "★" : "");
         out += tmp;
         hits++;
     }
