@@ -121,12 +121,14 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag: probe multiple global candidates for the script manager ──
-// Checks four globals found via ADRP+LDR[+0xB30] patterns in libqplayandroid.so:
-//   0x920630 — old/wrong (player stats object)
-//   0x8BCB30 — ADRP at 0x2C3B00, LDR X1,[X8,#0xB30], data segment
-//   0x92EB30 — ADRP at 0x353AA0, LDR X8,[X8,#0xB30], BSS
-//   0x92DB30 — ADRP at 0x3370EC, LDR X8,[X8,#0xB30], BSS
+// ── nativeDiag v23: READ-ONLY object-model validation ──
+// Verified via capstone RE (see project_graal_native_gs2_re memory):
+//   0x939bd0  = current level / script-scope global (set during script ticks)
+//   0x939bc8  = persistent registry root
+//   level+0xa0 -> actor container; container+0xc = int count; container+0x10 = obj*[]
+//   object+0x80 = bound script instance (non-null ⇒ scriptable / dispatchable)
+// Walks the live actor list and reports which objects carry a bound script and
+// their names. Purely read-only — no engine calls — every deref guarded by mincore().
 #include <sys/mman.h>
 
 static bool addr_mapped(uintptr_t addr) {
@@ -134,47 +136,104 @@ static bool addr_mapped(uintptr_t addr) {
     return mincore((void*)(addr & ~(uintptr_t)4095), 4096, &vec) == 0;
 }
 
+// Interpret p as a GraalString [i32 len][i32 ref][utf8], or one level of
+// indirection (p -> GraalString*). Returns "" if not a plausible ASCII name.
+static std::string read_graalstr(uintptr_t p, int depth = 0) {
+    if (!p || (p & 7) || !addr_mapped(p)) return "";
+    int32_t len = *(int32_t*)p;
+    if (len >= 1 && len <= 64 && addr_mapped(p + 8)) {
+        const char* c = (const char*)(p + 8);
+        std::string s;
+        for (int i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)c[i];
+            if (ch < 0x20 || ch > 0x7e) { s.clear(); break; }
+            s += (char)ch;
+        }
+        if (!s.empty()) return s;
+    }
+    if (depth == 0) return read_graalstr(*(uintptr_t*)p, 1);
+    return "";
+}
+
+// Scan obj[0..0x100] for the first field that looks like a name string.
+static std::string find_name(uintptr_t obj) {
+    for (uint32_t o = 0; o <= 0x100; o += 8) {
+        if (!addr_mapped(obj + o)) continue;
+        std::string s = read_graalstr(*(uintptr_t*)(obj + o));
+        if (s.size() >= 2) return s;
+    }
+    return "";
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
 
-    struct { const char* name; uintptr_t off; } cands[] = {
-        { "old_920630", 0x920630 },
-        { "new_8BCB30", 0x8BCB30 },
-        { "bss_92EB30", 0x92EB30 },
-        { "bss_92DB30", 0x92DB30 },
-    };
-
     std::string out;
-    char tmp[192];
+    char tmp[256];
 
-    for (auto& c : cands) {
-        uintptr_t gaddr = g_base + c.off;
-        if (!addr_mapped(gaddr)) {
-            snprintf(tmp, sizeof(tmp), "%s: UNMAPPED\n", c.name);
-            out += tmp; continue;
-        }
-        void* val = *(void**)gaddr;
-        snprintf(tmp, sizeof(tmp), "%s=%p", c.name, val);
-        out += tmp;
+    // Level global is set during script ticks; sample briefly to catch one.
+    volatile void** pLevel = (volatile void**)(g_base + 0x939bd0);
+    void* level = nullptr;
+    for (int i = 0; i < 200000 && !level; i++) level = (void*)*pLevel;
+    void* reg = *(void**)(g_base + 0x939bc8);
 
-        if (val && addr_mapped((uintptr_t)val)) {
-            // Peek at first 3 fields of the object
-            for (int fi = 0; fi < 3; fi++) {
-                uintptr_t fa = (uintptr_t)val + fi * 8;
-                if (!addr_mapped(fa)) break;
-                snprintf(tmp, sizeof(tmp), " [%d]=0x%lX", fi, *(uintptr_t*)fa);
-                out += tmp;
-            }
-            // Check +0xB30
-            if (addr_mapped((uintptr_t)val + 0xB30)) {
-                void* b30 = *(void**)((uintptr_t)val + 0xB30);
-                snprintf(tmp, sizeof(tmp), " B30=%p%s", b30, b30 ? "★" : "");
-                out += tmp;
-            }
+    snprintf(tmp, sizeof(tmp), "level(939bd0)=%p\nreg(939bc8)=%p\n", level, reg);
+    out += tmp;
+
+    // Registry root fields — may lead to the level when the global is null.
+    if (reg && addr_mapped((uintptr_t)reg)) {
+        out += "reg:";
+        for (uint32_t o = 0; o < 0x20; o += 8) {
+            if (!addr_mapped((uintptr_t)reg + o)) break;
+            snprintf(tmp, sizeof(tmp), " +%X=%p", o, *(void**)((uintptr_t)reg + o));
+            out += tmp;
         }
         out += "\n";
     }
+
+    if (!level) {
+        out += "level=null — press Diag while in-world (move around first)\n";
+        return env->NewStringUTF(out.c_str());
+    }
+    if (!addr_mapped((uintptr_t)level + 0xa0)) {
+        out += "level+0xa0 unmapped\n";
+        return env->NewStringUTF(out.c_str());
+    }
+
+    void* container = *(void**)((uintptr_t)level + 0xa0);
+    if (!container || !addr_mapped((uintptr_t)container + 0x10)) {
+        snprintf(tmp, sizeof(tmp), "container=%p (bad)\n", container);
+        out += tmp;
+        return env->NewStringUTF(out.c_str());
+    }
+    int32_t count = *(int32_t*)((uintptr_t)container + 0xc);
+    void** arr = *(void***)((uintptr_t)container + 0x10);
+    snprintf(tmp, sizeof(tmp), "actors: count=%d arr=%p\n", count, arr);
+    out += tmp;
+
+    if (count < 0 || count > 4096 || !arr || !addr_mapped((uintptr_t)arr)) {
+        out += "actor array bad\n";
+        return env->NewStringUTF(out.c_str());
+    }
+
+    int shown = 0, scriptable = 0;
+    for (int i = 0; i < count && shown < 20; i++) {
+        if (!addr_mapped((uintptr_t)(arr + i))) break;
+        uintptr_t obj = (uintptr_t)arr[i];
+        if (!obj || (obj & 7) || !addr_mapped(obj)) continue;
+
+        void* bound = addr_mapped(obj + 0x80) ? *(void**)(obj + 0x80) : nullptr;
+        std::string nm = find_name(obj);
+
+        snprintf(tmp, sizeof(tmp), "[%d]%p +80=%p%s %s\n",
+                 i, (void*)obj, bound, bound ? "★" : "", nm.c_str());
+        out += tmp;
+        shown++;
+        if (bound) scriptable++;
+    }
+    snprintf(tmp, sizeof(tmp), "scriptable(+80): %d/%d\n", scriptable, count);
+    out += tmp;
 
     return env->NewStringUTF(out.c_str());
 }
