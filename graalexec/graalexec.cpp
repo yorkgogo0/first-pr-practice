@@ -121,9 +121,10 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag: scan ctx struct for non-null pointers to find script manager offset ──
-// ctx+0xB30 returned null so we scan 0x800..0xD00 for candidates.
-// Safe: read-only, no engine calls.
+// ── nativeDiag: find which field of ctx points to the object with script manager ──
+// Scan ctx[0..0x1800], keep only heap-pointer-like values, check each at +0xB30.
+// Mark ★ if that sub-pointer's +0xB30 is non-null (= script manager found).
+// Safe: read-only, no engine function calls.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
@@ -131,29 +132,31 @@ Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
     if (!globalCtx) return env->NewStringUTF("ERR: ctx=null (not in world)");
 
-    // Scan ctx+0x800 .. ctx+0xD00 for non-null pointer-sized slots.
-    // Log up to 16 hits as "off:val" pairs. Each hit is a candidate for the script manager.
     std::string out;
-    out.reserve(512);
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "ctx=%p\n", globalCtx);
+    char tmp[96];
+    snprintf(tmp, sizeof(tmp), "ctx=%p B30=%p\n", globalCtx,
+             *(void**)((uint8_t*)globalCtx + 0xB30));
     out += tmp;
+
+    // Heap pointer range on this Android process (39-bit user space).
+    // Filters out small ints, data arrays, and huge packed values.
+    const uintptr_t LO = 0x600000000ULL;
+    const uintptr_t HI = 0x7FFFFFFFFFULL;
 
     int hits = 0;
-    for (uint32_t off = 0x800; off < 0xD00 && hits < 16; off += 8) {
-        void* val = *(void**)((uint8_t*)globalCtx + off);
-        if (val) {
-            snprintf(tmp, sizeof(tmp), "+%X:%p\n", off, val);
-            out += tmp;
-            hits++;
-        }
+    uintptr_t base = (uintptr_t)globalCtx;
+    for (uint32_t off = 0; off < 0x1800 && hits < 30; off += 8) {
+        uintptr_t val = *(uintptr_t*)(base + off);
+        if (val < LO || val > HI || (val & 7)) continue;
+        // Check B30 of this candidate
+        uintptr_t b30 = *(uintptr_t*)(val + 0xB30);
+        bool star = (b30 != 0);
+        snprintf(tmp, sizeof(tmp), "+%X→%p B30=%p%s\n",
+                 off, (void*)val, (void*)b30, star ? "★" : "");
+        out += tmp;
+        hits++;
     }
-    if (hits == 0) out += "no non-null ptrs in 0x800..0xD00\n";
-
-    // Also show the known offset result for reference
-    void* atB30 = *(void**)((uint8_t*)globalCtx + 0xB30);
-    snprintf(tmp, sizeof(tmp), "B30=%p", atB30);
-    out += tmp;
+    if (hits == 0) out += "no heap ptrs in ctx[0..0x1800]\n";
 
     return env->NewStringUTF(out.c_str());
 }
