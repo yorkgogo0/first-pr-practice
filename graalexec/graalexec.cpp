@@ -121,10 +121,12 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag: find which field of ctx leads to the script manager ──
-// Scan ctx[0..0x1800] for heap-pointer candidates.
-// Use mincore() to verify each candidate is mapped before reading +0xB30.
-// Mark ★ if val+0xB30 is non-null (= script manager found).
+// ── nativeDiag: probe multiple global candidates for the script manager ──
+// Checks four globals found via ADRP+LDR[+0xB30] patterns in libqplayandroid.so:
+//   0x920630 — old/wrong (player stats object)
+//   0x8BCB30 — ADRP at 0x2C3B00, LDR X1,[X8,#0xB30], data segment
+//   0x92EB30 — ADRP at 0x353AA0, LDR X8,[X8,#0xB30], BSS
+//   0x92DB30 — ADRP at 0x3370EC, LDR X8,[X8,#0xB30], BSS
 #include <sys/mman.h>
 
 static bool addr_mapped(uintptr_t addr) {
@@ -136,34 +138,43 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
     if (!init_engine()) return env->NewStringUTF("ERR: engine not ready");
 
-    void* globalCtx = *(void**)(g_base + OFF_GLOBAL_CTX_PTR);
-    if (!globalCtx) return env->NewStringUTF("ERR: ctx=null (not in world)");
+    struct { const char* name; uintptr_t off; } cands[] = {
+        { "old_920630", 0x920630 },
+        { "new_8BCB30", 0x8BCB30 },
+        { "bss_92EB30", 0x92EB30 },
+        { "bss_92DB30", 0x92DB30 },
+    };
 
     std::string out;
-    char tmp[96];
-    snprintf(tmp, sizeof(tmp), "ctx=%p\n", globalCtx);
-    out += tmp;
+    char tmp[192];
 
-    const uintptr_t LO = 0x600000000ULL;
-    const uintptr_t HI = 0x7FFFFFFFFFULL;
-
-    int hits = 0;
-    uintptr_t base = (uintptr_t)globalCtx;
-    for (uint32_t off = 0; off < 0x1800 && hits < 30; off += 8) {
-        if (!addr_mapped(base + off)) continue;
-        uintptr_t val = *(uintptr_t*)(base + off);
-        if (val < LO || val > HI || (val & 7)) continue;
-
-        uintptr_t b30 = 0;
-        bool b30ok = addr_mapped(val + 0xB30);
-        if (b30ok) b30 = *(uintptr_t*)(val + 0xB30);
-
-        snprintf(tmp, sizeof(tmp), "+%X→%p B30=%p%s\n",
-                 off, (void*)val, (void*)b30, (b30 != 0) ? "★" : "");
+    for (auto& c : cands) {
+        uintptr_t gaddr = g_base + c.off;
+        if (!addr_mapped(gaddr)) {
+            snprintf(tmp, sizeof(tmp), "%s: UNMAPPED\n", c.name);
+            out += tmp; continue;
+        }
+        void* val = *(void**)gaddr;
+        snprintf(tmp, sizeof(tmp), "%s=%p", c.name, val);
         out += tmp;
-        hits++;
+
+        if (val && addr_mapped((uintptr_t)val)) {
+            // Peek at first 3 fields of the object
+            for (int fi = 0; fi < 3; fi++) {
+                uintptr_t fa = (uintptr_t)val + fi * 8;
+                if (!addr_mapped(fa)) break;
+                snprintf(tmp, sizeof(tmp), " [%d]=0x%lX", fi, *(uintptr_t*)fa);
+                out += tmp;
+            }
+            // Check +0xB30
+            if (addr_mapped((uintptr_t)val + 0xB30)) {
+                void* b30 = *(void**)((uintptr_t)val + 0xB30);
+                snprintf(tmp, sizeof(tmp), " B30=%p%s", b30, b30 ? "★" : "");
+                out += tmp;
+            }
+        }
+        out += "\n";
     }
-    if (hits == 0) out += "no heap ptrs in ctx[0..0x1800]\n";
 
     return env->NewStringUTF(out.c_str());
 }
