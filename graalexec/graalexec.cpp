@@ -121,13 +121,15 @@ Java_com_graal_exec_GraalExec_nativeCompile(JNIEnv* env, jclass, jstring jsrc) {
     return arr;
 }
 
-// ── nativeDiag v24: READ-ONLY hunt for the real script sub-object ──
-// v23 confirmed on-device: level=*0x939bd0, level+0xa0 -> container (+0xc count,
-// +0x10 obj*[]) holds real 0xb400 heap entities. BUT entity+0x80 is a DOUBLE
-// (coordinate), not the script instance — the scriptable object dispatch runs on
-// is a SUB-OBJECT hanging off each entity. v24 dumps every heap-pointer field of
-// each entity and flags the sub-object whose +0x80 (or +0x60) is itself a heap
-// pointer = the script-object candidate. Purely read-only, mincore()-guarded.
+// ── nativeDiag v25: resolve the bind vtable-slot + dump a live bound SI ──
+// The engine binds a script's handler table (SI+0x80) via a class virtual
+// [entity_vtable+0x68] fired by the update tick 0x87077c — a runtime slot we
+// can't pin statically. v25 reads it live: for each entity it prints the module
+// offsets (ptr - base) of vtable slots [0x68]/[0x70]/[0x98]/[0x08] (the bind +
+// onCreated + guard methods), follows entity+0x50 -> SI, and if SI+0x80 is bound
+// dumps the handler vector (count/array + entry event names @+0xa8/+0xb0). This
+// names the bind function to RE and shows the exact structure to reproduce.
+// Purely read-only — no engine calls — every deref mincore()-guarded.
 #include <sys/mman.h>
 
 static bool addr_mapped(uintptr_t addr) {
@@ -138,6 +140,12 @@ static bool addr_mapped(uintptr_t addr) {
 // Android Scudo heap pointers have the tag 0xb400 in the top 16 bits.
 static bool is_heap(uintptr_t v) {
     return v && (v >> 48) == 0xb400 && addr_mapped(v);
+}
+
+// A pointer into the mapped libqplayandroid.so image (vtables, code) — used to
+// turn a runtime vtable slot back into a static VMA (ptr - g_base).
+static bool is_module(uintptr_t v) {
+    return g_base && v >= g_base && v < g_base + 0x0A00000 && addr_mapped(v);
 }
 
 // Interpret p as a GraalString [i32 len][i32 ref][utf8], or one level of
@@ -221,29 +229,62 @@ Java_com_graal_exec_GraalExec_nativeDiag(JNIEnv* env, jclass) {
         return env->NewStringUTF(out.c_str());
     }
 
-    // For the first entities, list every heap-pointer field in [0..0xB8] and
-    // follow each to see if that sub-object is the script object (its +0x80 or
-    // +0x60 is itself a heap pointer = a bound instance / function table).
-    for (int i = 0; i < count && i < 8; i++) {
-        if (!addr_mapped((uintptr_t)(arr + i))) break;
-        uintptr_t obj = (uintptr_t)arr[i];
-        if (!obj || (obj & 7) || !addr_mapped(obj)) continue;
+    snprintf(tmp, sizeof(tmp), "base=%p\n", (void*)g_base);
+    out += tmp;
 
-        std::string nm = find_name(obj);
-        snprintf(tmp, sizeof(tmp), "[%d]%p %s\n", i, (void*)obj, nm.c_str());
+    // For the first entities: resolve the class vtable slots the tick calls
+    // (bind=+0x68, onCreated=+0x70, guard=+0x98) to module offsets, then follow
+    // entity+0x50 -> SI and dump SI+0x80 if a script is already bound.
+    for (int i = 0; i < count && i < 6; i++) {
+        if (!addr_mapped((uintptr_t)(arr + i))) break;
+        uintptr_t ent = (uintptr_t)arr[i];
+        if (!ent || (ent & 7) || !addr_mapped(ent)) continue;
+
+        uintptr_t vt = *(uintptr_t*)ent;                 // entity C++ vtable
+        snprintf(tmp, sizeof(tmp), "[%d]e=%p", i, (void*)ent);
+        out += tmp;
+        if (is_module(vt)) {
+            snprintf(tmp, sizeof(tmp), " vt=+%lX", (unsigned long)(vt - g_base));
+            out += tmp;
+            const uint32_t slots[] = { 0x68, 0x70, 0x98, 0x08 };
+            for (uint32_t s : slots) {
+                if (!addr_mapped(vt + s)) continue;
+                uintptr_t fn = *(uintptr_t*)(vt + s);
+                if (is_module(fn))
+                    snprintf(tmp, sizeof(tmp), " [%X]=+%lX", s, (unsigned long)(fn - g_base));
+                else
+                    snprintf(tmp, sizeof(tmp), " [%X]=%p", s, (void*)fn);
+                out += tmp;
+            }
+        }
+        out += "\n";
+
+        // SI chain: entity+0x50 -> script instance
+        uintptr_t si = addr_mapped(ent + 0x50) ? *(uintptr_t*)(ent + 0x50) : 0;
+        if (!is_heap(si)) { out += "  +50: no SI\n"; continue; }
+        uintptr_t si0  = addr_mapped(si)        ? *(uintptr_t*)(si)        : 0;
+        uintptr_t si38 = addr_mapped(si + 0x38) ? *(uintptr_t*)(si + 0x38) : 0;
+        uintptr_t si80 = addr_mapped(si + 0x80) ? *(uintptr_t*)(si + 0x80) : 0;
+        snprintf(tmp, sizeof(tmp), "  SI=%p [0]%s +38=%s +80=%p\n",
+                 (void*)si, (si0 == ent ? "=ENT" : "?"),
+                 (is_heap(si38) ? "P" : "-"), (void*)si80);
         out += tmp;
 
-        for (uint32_t o = 0; o <= 0xB8; o += 8) {
-            if (!addr_mapped(obj + o)) continue;
-            uintptr_t v = *(uintptr_t*)(obj + o);
-            if (!is_heap(v)) continue;
-
-            uintptr_t s60 = addr_mapped(v + 0x60) ? *(uintptr_t*)(v + 0x60) : 0;
-            uintptr_t s80 = addr_mapped(v + 0x80) ? *(uintptr_t*)(v + 0x80) : 0;
-            std::string sn = find_name(v);
-            const char* mk = is_heap(s80) ? " <SCR80" : (is_heap(s60) ? " <SCR60" : "");
-            snprintf(tmp, sizeof(tmp), "  +%X->%p%s %s\n", o, (void*)v, mk, sn.c_str());
+        // If a handler table is already bound, dump it (the structure we must build)
+        if (is_heap(si80)) {
+            uint32_t hc  = addr_mapped(si80 + 0xc)  ? *(uint32_t*)(si80 + 0xc)  : 0;
+            uintptr_t ha = addr_mapped(si80 + 0x10) ? *(uintptr_t*)(si80 + 0x10) : 0;
+            snprintf(tmp, sizeof(tmp), "  SI+80 BOUND: count=%u arr=%p\n", hc, (void*)ha);
             out += tmp;
+            for (uint32_t e = 0; e < hc && e < 5 && is_heap(ha); e++) {
+                if (!addr_mapped(ha + e * 8)) break;
+                uintptr_t entry = *(uintptr_t*)(ha + e * 8);
+                if (!is_heap(entry)) continue;
+                std::string n1 = addr_mapped(entry + 0xa8) ? read_graalstr(*(uintptr_t*)(entry + 0xa8)) : "";
+                std::string n2 = addr_mapped(entry + 0xb0) ? read_graalstr(*(uintptr_t*)(entry + 0xb0)) : "";
+                snprintf(tmp, sizeof(tmp), "    e%u: '%s' / '%s'\n", e, n1.c_str(), n2.c_str());
+                out += tmp;
+            }
         }
     }
 
